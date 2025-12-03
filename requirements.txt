@@ -1,0 +1,28 @@
+# requirements.txt (revisi)
+numpy>=2.0,<3.0
+pandas>=2.2,<2.3
+pyarrow>=17.0
+numexpr>=2.8
+
+openpyxl>=3.1
+xlsxwriter>=3.2
+
+matplotlib>=3.9
+tqdm>=4.66
+python-dotenv>=1.0
+
+SQLAlchemy>=2.0
+pymysql>=1.1
+
+statsmodels>=0.14
+
+scikit-learn>=1.5
+lightgbm>=4.5
+optuna>=3.6
+
+streamlit>=1.39
+
+# PyTorch Lightning stack (tanpa torch di file ini)
+pytorch-lightning==2.4.0
+torchmetrics>=1.4,<2.0
+pytorch-forecasting==1.5.0

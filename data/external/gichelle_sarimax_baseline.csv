@@ -1,0 +1,10 @@
+area,cabang,cabang_full,sku,model,RMSE_train,RMSE_test,source
+1A,02A,02A-GDWMS,BUVW001KSW,SARIMAX_Gichelle_2025,1596.83,1374.8,Gichelle_thesis_table
+1B,05A,05A-GDWMS,BUVW001KSW,SARIMAX_Gichelle_2025,1719.0,653.75,Gichelle_thesis_table
+2,13A,13A-GDWMS,DOPQ001K002,SARIMAX_Gichelle_2025,2467.93,1311.26,Gichelle_thesis_table
+3,13I,13I-GDWMS,BUVW001KSW,SARIMAX_Gichelle_2025,5687.7,7161.3,Gichelle_thesis_table
+4,14A,14A-GDWMS,BUVW001KSW,SARIMAX_Gichelle_2025,1548.84,1645.25,Gichelle_thesis_table
+5,16C,16C-GDWMS,DOPQ001K009,SARIMAX_Gichelle_2025,1672.5,2335.16,Gichelle_thesis_table
+6,29A,29A-GDWMS,BUVW001KSW,SARIMAX_Gichelle_2025,2274.75,823.0,Gichelle_thesis_table
+7,23A,23A-GDWMS,BUVW001KSW,SARIMAX_Gichelle_2025,2232.67,1888.96,Gichelle_thesis_table
+8,17A,17A-GDWMS,DOPQ001K002,SARIMAX_Gichelle_2025,862.36,438.16,Gichelle_thesis_table

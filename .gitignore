@@ -1,0 +1,22 @@
+# environment & cache
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# log & file sementara
+*.log
+*.tmp
+
+# output training & checkpoint gede
+lightning_logs/
+tft_checkpoints_*/
+models/
+outputs/
+
+# virtual environment
+.venv/
+
+# vscode setting lokal
+.vscode/
