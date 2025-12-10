@@ -22,3 +22,5 @@ tft_ckpt_warmup/
 
 # vscode setting lokal
 .vscode/
+
+tft_full_eval/
