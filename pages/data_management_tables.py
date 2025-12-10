@@ -9,75 +9,31 @@ from app.services.external_upload_service import handle_external_upload
 from app.loading_utils import init_loading_css, action_with_loader
 from app.ui.theme import inject_global_theme, render_sidebar_user_and_logout
 from app.services.auth_guard import require_login
-
+from app.services.page_loader import init_page_loader_css, page_loading
 from app.services.sales_upload_service import (
     preprocess_sales_and_stock_df,
     save_sales_monthly_to_db,
     save_latest_stock_to_db,
 )
 
-# =========================
-# PAGE CONFIG + THEME
-# =========================
+# Konfigurasi halaman
 st.set_page_config(
     page_title="Data Management",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-require_login()
-inject_global_theme()
-render_sidebar_user_and_logout()
-init_loading_css()
+# Loader CSS global
+init_page_loader_css()
 
-# =========================
-# CSS: INPUT PUTIH + BUTTON SERAGAM
-# =========================
-st.markdown(
-    """
-    <style>
-    /* Paksa background input dan dropdown menjadi Putih */
-    div[data-baseweb="select"] > div,
-    div[data-baseweb="input"] > div,
-    div[data-baseweb="base-input"] {
-        background-color: #FFFFFF !important;
-        border: 1px solid #E5E7EB !important;
-        color: #111827 !important;
-    }
-    
-    /* Warna teks di dalam input */
-    input[data-baseweb="input"] {
-        color: #111827 !important;
-    }
+# Setup awal pakai overlay
+with page_loading("Menyiapkan halaman Data Management..."):
+    require_login()
+    inject_global_theme()
+    render_sidebar_user_and_logout()
+    init_loading_css()
 
-    /* Warna teks placeholder */
-    ::placeholder {
-        color: #9CA3AF !important;
-        opacity: 1;
-    }
-    
-    /* Dropdown menu items container */
-    ul[data-baseweb="menu"] {
-        background-color: #FFFFFF !important;
-    }
-
-    /* Samakan style & ukuran semua tombol */
-    .stButton > button {
-        min-width: 170px; /* Lebar minimum tombol */
-        padding: 0.45rem 1.4rem;
-        border-radius: 999px;
-        font-weight: 500;
-        font-size: 0.95rem;
-        white-space: nowrap;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-# =========================
-# GUARD: LOGIN & ROLE
-# =========================
+# Cek user di session
 if "user" not in st.session_state:
     st.error("Silakan login terlebih dahulu.")
     st.stop()
@@ -86,17 +42,51 @@ user = st.session_state["user"]
 user_id = user.get("user_id")
 role = user.get("role", "user")
 
+# Kalau mau batasi per area, isi list-nya
 allowed_areas = None  # Admin akses semua area
 
-# =========================
-# HEADER
-# =========================
-st.markdown("## Data Management: Penjualan & Eksternal")
-st.caption("Pusat kendali untuk upload data transaksi harian, manajemen stok, dan faktor eksternal.")
+# Styling input dan tombol di konten utama
+st.markdown(
+    """
+    <style>
+    div[data-baseweb="select"] > div,
+    div[data-baseweb="input"] > div,
+    div[data-baseweb="base-input"] {
+        background-color: #FFFFFF !important;
+        border: 1px solid #E5E7EB !important;
+        color: #111827 !important;
+    }
+    
+    input[data-baseweb="input"] {
+        color: #111827 !important;
+    }
 
-# =========================
-# STATE MANAGEMENT
-# =========================
+    ::placeholder {
+        color: #9CA3AF !important;
+        opacity: 1;
+    }
+    
+    ul[data-baseweb="menu"] {
+        background-color: #FFFFFF !important;
+    }
+
+    .main .block-container .stButton > button {
+        min-width: 170px;
+        padding: 0.45rem 1.4rem;
+        border-radius: 999px;
+        font-weight: 500;
+        font-size: 0.95rem;
+        white-space: nowrap;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown("## Data Management: Penjualan & Eksternal")
+st.caption("Upload dan koreksi data penjualan bulanan serta faktor eksternal.")
+
+# State kecil untuk upload dan konfirmasi hapus
 if "sales_upload_version" not in st.session_state:
     st.session_state["sales_upload_version"] = 0
 
@@ -106,24 +96,19 @@ if "ext_upload_version" not in st.session_state:
 if "ext_confirm_delete_stage" not in st.session_state:
     st.session_state["ext_confirm_delete_stage"] = 0
 
-# =========================
-# TABS
-# =========================
 tab_penjualan, tab_external = st.tabs(["Penjualan Bulanan", "Data Eksternal"])
 
 
-# =========================================================
 # TAB 1: PENJUALAN BULANAN
-# =========================================================
 with tab_penjualan:
     st.markdown("### Manajemen Data Penjualan")
 
-    # --- SECTION 1: UPLOAD ---
+    # Upload transaksi harian → agregasi bulanan
     with st.container(border=True):
         st.markdown("Import Data Baru")
         st.info(
-            "Format Upload: Data Transaksi Harian (.xlsx / .csv). "
-            "Sistem otomatis mengubah ke data bulanan. "
+            "Format upload: data transaksi harian (.xlsx / .csv). "
+            "Sistem mengubah otomatis ke data bulanan. "
             "Kolom wajib: Posting Date, Location Code, SKU, Quantity."
         )
 
@@ -136,10 +121,11 @@ with tab_penjualan:
                 "Pilih File",
                 type=["xlsx", "xls", "csv"],
                 key=sales_upload_key,
-                label_visibility="collapsed"
+                label_visibility="collapsed",
             )
 
         if uploaded is not None:
+
             def process_sales_upload():
                 if uploaded.name.lower().endswith(".csv"):
                     raw_df = pd.read_csv(uploaded)
@@ -172,11 +158,11 @@ with tab_penjualan:
                     f"{n_latest} data stok diperbarui."
                 )
 
-                with st.expander("Lihat Preview Hasil"):
-                    st.markdown("Agregat Bulanan:")
+                with st.expander("Lihat preview hasil"):
+                    st.markdown("Agregat bulanan:")
                     st.dataframe(df_monthly.head(50), use_container_width=True)
                     if not df_latest.empty:
-                        st.markdown("Stok Terakhir:")
+                        st.markdown("Stok terakhir:")
                         st.dataframe(df_latest.head(50), use_container_width=True)
 
                 st.session_state["sales_upload_version"] += 1
@@ -192,28 +178,34 @@ with tab_penjualan:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- SECTION 2: EDIT DATA ---
+    # Filter + editor data penjualan bulanan
     with st.container(border=True):
         st.markdown("Filter & Edit Data Penjualan Bulanan")
 
-        # Load Filters
-        with engine.begin() as conn:
-            if allowed_areas:
-                rows_cabang = conn.execute(
-                    text("SELECT DISTINCT cabang FROM sales_monthly WHERE area IN :areas ORDER BY cabang"),
-                    {"areas": tuple(allowed_areas)}
-                ).fetchall()
-                row_minmax = conn.execute(
-                    text("SELECT MIN(periode), MAX(periode) FROM sales_monthly WHERE area IN :areas"),
-                    {"areas": tuple(allowed_areas)}
-                ).fetchone()
-            else:
-                rows_cabang = conn.execute(
-                    text("SELECT DISTINCT cabang FROM sales_monthly ORDER BY cabang")
-                ).fetchall()
-                row_minmax = conn.execute(
-                    text("SELECT MIN(periode), MAX(periode) FROM sales_monthly")
-                ).fetchone()
+        with page_loading("Mengambil filter cabang & periode penjualan..."):
+            with engine.begin() as conn:
+                if allowed_areas:
+                    rows_cabang = conn.execute(
+                        text(
+                            "SELECT DISTINCT cabang FROM sales_monthly "
+                            "WHERE area IN :areas ORDER BY cabang"
+                        ),
+                        {"areas": tuple(allowed_areas)},
+                    ).fetchall()
+                    row_minmax = conn.execute(
+                        text(
+                            "SELECT MIN(periode), MAX(periode) "
+                            "FROM sales_monthly WHERE area IN :areas"
+                        ),
+                        {"areas": tuple(allowed_areas)},
+                    ).fetchone()
+                else:
+                    rows_cabang = conn.execute(
+                        text("SELECT DISTINCT cabang FROM sales_monthly ORDER BY cabang")
+                    ).fetchall()
+                    row_minmax = conn.execute(
+                        text("SELECT MIN(periode), MAX(periode) FROM sales_monthly")
+                    ).fetchone()
 
         cabang_list = [r[0] for r in rows_cabang]
         min_p, max_p = row_minmax[0], row_minmax[1]
@@ -252,7 +244,6 @@ with tab_penjualan:
             if start_date > end_date:
                 st.error("Periode mulai tidak boleh lebih besar dari akhir.")
             else:
-                # Query Data
                 query = """
                     SELECT area, cabang, sku, periode, qty
                     FROM sales_monthly
@@ -267,23 +258,23 @@ with tab_penjualan:
                     query += " AND cabang = :cabang"
                     params["cabang"] = selected_cabang
 
-                with engine.begin() as conn:
-                    df_penj = pd.read_sql(text(query), conn, params=params)
+                with page_loading("Mengambil data penjualan dari database..."):
+                    with engine.begin() as conn:
+                        df_penj = pd.read_sql(text(query), conn, params=params)
 
                 if df_penj.empty:
                     st.info("Data tidak ditemukan untuk filter yang dipilih.")
                 else:
                     df_penj["periode"] = pd.to_datetime(df_penj["periode"]).dt.date
-                    
-                    # SKU Filter (Opsional)
                     all_skus = sorted(df_penj["sku"].astype(str).unique().tolist())
+
                     sel_skus = st.multiselect(
                         "Filter SKU (opsional)",
                         options=all_skus,
                         placeholder="Ketik untuk cari SKU tertentu...",
-                        help="Kalau dikosongkan, semua SKU akan ditampilkan."
+                        help="Kosongkan kalau ingin menampilkan semua SKU.",
                     )
-                    
+
                     if sel_skus:
                         df_view = df_penj[df_penj["sku"].astype(str).isin(sel_skus)].reset_index(drop=True)
                     else:
@@ -301,7 +292,7 @@ with tab_penjualan:
                             "area": st.column_config.TextColumn(
                                 "Area",
                                 disabled=True,
-                                help="Area / wilayah cabang (informasi, tidak bisa diubah).",
+                                help="Area / wilayah cabang.",
                             ),
                             "cabang": st.column_config.TextColumn(
                                 "Cabang",
@@ -311,43 +302,51 @@ with tab_penjualan:
                             "sku": st.column_config.TextColumn(
                                 "SKU",
                                 disabled=True,
-                                help="Kode barang (SKU).",
+                                help="Kode barang.",
                             ),
                             "periode": st.column_config.DateColumn(
                                 "Periode (Bulan)",
                                 disabled=True,
                                 format="MMM YYYY",
-                                help="Bulan penjualan yang tersimpan.",
+                                help="Bulan penjualan.",
                             ),
                             "qty": st.column_config.NumberColumn(
                                 "Qty Terjual",
                                 step=1,
-                                help="Jumlah total barang terjual di bulan tersebut. Kolom ini bisa diubah.",
+                                help="Jumlah barang terjual per bulan.",
                             ),
                         },
                         key="editor_sales_main",
                     )
 
-                    # Save Logic
                     def save_penjualan():
                         try:
                             records = []
                             for _, row in edited_penj.iterrows():
-                                records.append({
-                                    "area": row["area"],
-                                    "cabang": row["cabang"],
-                                    "sku": str(row["sku"]),
-                                    "periode": row["periode"],
-                                    "qty": float(row["qty"]),
-                                })
-                            
+                                records.append(
+                                    {
+                                        "area": row["area"],
+                                        "cabang": row["cabang"],
+                                        "sku": str(row["sku"]),
+                                        "periode": row["periode"],
+                                        "qty": float(row["qty"]),
+                                    }
+                                )
+
                             with engine.begin() as conn:
-                                conn.execute(text("""
-                                    INSERT INTO sales_monthly (area, cabang, sku, periode, qty)
-                                    VALUES (:area, :cabang, :sku, :periode, :qty)
-                                    ON DUPLICATE KEY UPDATE qty=VALUES(qty), area=VALUES(area)
-                                """), records)
-                            
+                                conn.execute(
+                                    text(
+                                        """
+                                        INSERT INTO sales_monthly (area, cabang, sku, periode, qty)
+                                        VALUES (:area, :cabang, :sku, :periode, :qty)
+                                        ON DUPLICATE KEY UPDATE
+                                            qty = VALUES(qty),
+                                            area = VALUES(area)
+                                        """
+                                    ),
+                                    records,
+                                )
+
                             st.success(f"Berhasil menyimpan {len(records)} baris data.")
                             try:
                                 st.toast("Perubahan tersimpan.", icon="✅")
@@ -366,13 +365,11 @@ with tab_penjualan:
                         )
 
 
-# =========================================================
 # TAB 2: DATA EKSTERNAL
-# =========================================================
 with tab_external:
     st.markdown("### Manajemen Data Eksternal")
 
-    # --- SECTION 1: UPLOAD ---
+    # Upload data eksternal
     with st.container(border=True):
         st.markdown("Import Data Eksternal")
         
@@ -388,7 +385,7 @@ with tab_external:
                 "Jenis Data",
                 list(jenis_map.keys()),
                 key="rad_ext_type",
-                help="Pilih jenis faktor eksternal yang akan di-upload."
+                help="Pilih jenis faktor eksternal yang akan di-upload.",
             )
             jenis_kode = jenis_map[jenis_label]
         
@@ -401,11 +398,12 @@ with tab_external:
             )
 
         if uploaded_ext:
+
             def process_ext():
                 try:
                     df_up, n_rows = handle_external_upload(uploaded_ext, jenis_kode, user_id)
                     st.success(f"Sukses. {n_rows} baris data eksternal tersimpan.")
-                    with st.expander("Preview Data"):
+                    with st.expander("Preview data"):
                         st.dataframe(df_up.head(50), use_container_width=True)
                     st.session_state["ext_upload_version"] += 1
                 except Exception as e:
@@ -422,7 +420,7 @@ with tab_external:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # --- SECTION 2: EDIT ---
+    # Filter + editor data eksternal
     with st.container(border=True):
         st.markdown("Filter & Edit Data Eksternal")
 
@@ -447,8 +445,9 @@ with tab_external:
                 res = conn.execute(text(sql), params).fetchone()
             return res[0], res[1]
 
-        cabs_ext = get_ext_cabang(allowed_areas)
-        min_pe, max_pe = get_ext_period(allowed_areas)
+        with page_loading("Mengambil daftar cabang & periode data eksternal..."):
+            cabs_ext = get_ext_cabang(allowed_areas)
+            min_pe, max_pe = get_ext_period(allowed_areas)
 
         if not cabs_ext or min_pe is None:
             st.warning("Data eksternal kosong.")
@@ -459,7 +458,7 @@ with tab_external:
                     "Cabang",
                     ["ALL"] + cabs_ext,
                     key="ext_sel_cab",
-                    help="Pilih cabang yang ingin dilihat datanya."
+                    help="Pilih cabang yang ingin dilihat datanya.",
                 )
             with cf2:
                 start_ext = st.date_input(
@@ -468,7 +467,7 @@ with tab_external:
                     min_value=min_pe,
                     max_value=max_pe,
                     key="ext_sd",
-                    help="Periode awal data eksternal."
+                    help="Periode awal data eksternal.",
                 )
             with cf3:
                 end_ext = st.date_input(
@@ -477,13 +476,12 @@ with tab_external:
                     min_value=min_pe,
                     max_value=max_pe,
                     key="ext_ed",
-                    help="Periode akhir data eksternal."
+                    help="Periode akhir data eksternal.",
                 )
 
             if start_ext > end_ext:
                 st.error("Tanggal mulai tidak valid.")
             else:
-                # Query
                 q_ext = """
                     SELECT cabang, area, periode, event_flag, holiday_count, rainfall
                     FROM external_data
@@ -500,8 +498,9 @@ with tab_external:
                 
                 q_ext += " ORDER BY cabang, periode"
 
-                with engine.begin() as conn:
-                    df_ext = pd.read_sql(text(q_ext), conn, params=p_ext)
+                with page_loading("Mengambil data eksternal dari database..."):
+                    with engine.begin() as conn:
+                        df_ext = pd.read_sql(text(q_ext), conn, params=p_ext)
 
                 if df_ext.empty:
                     st.info("Data tidak ditemukan untuk filter ini.")
@@ -536,7 +535,7 @@ with tab_external:
                             ),
                             "event_flag": st.column_config.NumberColumn(
                                 "Ada Event? (0 / 1)",
-                                help="Isi 1 kalau ada event/gathering yang mempengaruhi penjualan, 0 kalau tidak ada.",
+                                help="Isi 1 jika ada event/gathering, 0 jika tidak ada.",
                             ),
                             "holiday_count": st.column_config.NumberColumn(
                                 "Jumlah Hari Libur",
@@ -544,115 +543,129 @@ with tab_external:
                             ),
                             "rainfall": st.column_config.NumberColumn(
                                 "Curah Hujan (mm)",
-                                help="Curah hujan total/rata-rata di area terkait (satuan mm).",
+                                help="Curah hujan total/rata-rata (mm).",
                             ),
                             "Hapus": st.column_config.CheckboxColumn(
                                 "Hapus",
-                                help="Centang kalau data baris ini mau dihapus permanen.",
+                                help="Centang kalau baris ini mau dihapus.",
                             ),
                         },
                         key="editor_ext_main",
                     )
 
-                    # ========================================================
-                    # BUTTONS LAYOUT FIX
-                    # ========================================================
                     st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
                     
-                    # Rasio [2, 2, 6] agar tombol tidak bertumpuk
                     cb_del, cb_save, cb_spc = st.columns([2, 2, 6])
 
-                    # 1. KOLOM KIRI: TOMBOL HAPUS
                     with cb_del:
-                        # Container agar tombol sejajar vertikal
                         sub_c1 = st.container()
                         with sub_c1:
                             if st.button(
-                                "Hapus Data",
+                                "Hapus Data Tercentang",
                                 type="secondary",
                                 key="btn_init_del",
-                                use_container_width=True
+                                use_container_width=True,
                             ):
                                 st.session_state["ext_confirm_delete_stage"] = 1
                         
-                        # Logika Konfirmasi Hapus
                         if st.session_state["ext_confirm_delete_stage"] == 1:
-                            st.markdown("<div style='height: 6px'></div>", unsafe_allow_html=True)
-                            st.warning(f"⚠️ Hapus {len(ed_ext)} data terpilih?")
-                            
-                            def del_all():
-                                recs = [
-                                    {"c": r["cabang"], "p": r["periode"]}
-                                    for _, r in ed_ext.iterrows()
-                                ]
-                                with engine.begin() as conn:
-                                    conn.execute(
-                                        text("DELETE FROM external_data WHERE cabang=:c AND periode=:p"),
-                                        recs,
-                                    )
+                            to_del = ed_ext[ed_ext["Hapus"] == True]
+                            n_del = len(to_del)
+
+                            if n_del == 0:
+                                st.info("Tidak ada baris yang dicentang untuk dihapus.")
                                 st.session_state["ext_confirm_delete_stage"] = 0
-                                st.success("Data dihapus.")
+                            else:
+                                st.markdown("<div style='height: 6px'></div>", unsafe_allow_html=True)
+                                st.warning(f"⚠️ Hapus {n_del} baris data terpilih?")
 
-                            action_with_loader(
-                                key="act_del_all_confirm",
-                                button_label="Ya, Hapus Semua",
-                                message="Menghapus...",
-                                fn=del_all,
-                            )
+                                def del_all():
+                                    recs = [
+                                        {"c": r["cabang"], "p": r["periode"]}
+                                        for _, r in to_del.iterrows()
+                                    ]
+                                    with engine.begin() as conn:
+                                        conn.execute(
+                                            text(
+                                                "DELETE FROM external_data "
+                                                "WHERE cabang = :c AND periode = :p"
+                                            ),
+                                            recs,
+                                        )
+                                    st.session_state["ext_confirm_delete_stage"] = 0
+                                    st.success("Data terpilih telah dihapus.")
+                                    try:
+                                        st.toast("Data eksternal terpilih dihapus.", icon="🗑️")
+                                    except Exception:
+                                        pass
 
-                    # 2. KOLOM TENGAH: TOMBOL SIMPAN
+                                action_with_loader(
+                                    key="act_del_all_confirm",
+                                    button_label="Ya, Hapus",
+                                    message="Menghapus...",
+                                    fn=del_all,
+                                )
+
                     with cb_save:
                         def save_ext():
                             to_del = ed_ext[ed_ext["Hapus"] == True]
                             to_save = ed_ext[ed_ext["Hapus"] == False]
                             
                             with engine.begin() as conn:
-                                # A. UPSERT
                                 upserts = []
                                 for _, r in to_save.iterrows():
-                                    upserts.append({
-                                        "c": r["cabang"],
-                                        "a": r.get("area") or r["cabang"],
-                                        "p": r["periode"],
-                                        "ef": int(r["event_flag"]),
-                                        "hc": int(r["holiday_count"]),
-                                        "rf": float(r["rainfall"]),
-                                        "sf": "manual_edit",
-                                        "ub": user_id,
-                                    })
+                                    upserts.append(
+                                        {
+                                            "c": r["cabang"],
+                                            "a": r.get("area") or r["cabang"],
+                                            "p": r["periode"],
+                                            "ef": int(r["event_flag"]),
+                                            "hc": int(r["holiday_count"]),
+                                            "rf": float(r["rainfall"]),
+                                            "sf": "manual_edit",
+                                            "ub": user_id,
+                                        }
+                                    )
                                 if upserts:
-                                    conn.execute(text("""
-                                        INSERT INTO external_data (
-                                            cabang, area, periode,
-                                            event_flag, holiday_count, rainfall,
-                                            source_filename, uploaded_by
-                                        )
-                                        VALUES (
-                                            :c, :a, :p,
-                                            :ef, :hc, :rf,
-                                            :sf, :ub
-                                        )
-                                        ON DUPLICATE KEY UPDATE
-                                            event_flag    = VALUES(event_flag),
-                                            holiday_count = VALUES(holiday_count),
-                                            rainfall      = VALUES(rainfall),
-                                            uploaded_by   = VALUES(uploaded_by)
-                                    """), upserts)
+                                    conn.execute(
+                                        text(
+                                            """
+                                            INSERT INTO external_data (
+                                                cabang, area, periode,
+                                                event_flag, holiday_count, rainfall,
+                                                source_filename, uploaded_by
+                                            )
+                                            VALUES (
+                                                :c, :a, :p,
+                                                :ef, :hc, :rf,
+                                                :sf, :ub
+                                            )
+                                            ON DUPLICATE KEY UPDATE
+                                                event_flag    = VALUES(event_flag),
+                                                holiday_count = VALUES(holiday_count),
+                                                rainfall      = VALUES(rainfall),
+                                                uploaded_by   = VALUES(uploaded_by)
+                                            """
+                                        ),
+                                        upserts,
+                                    )
                                 
-                                # B. DELETE
                                 if not to_del.empty:
                                     dels = [
                                         {"c": r["cabang"], "p": r["periode"]}
                                         for _, r in to_del.iterrows()
                                     ]
                                     conn.execute(
-                                        text("DELETE FROM external_data WHERE cabang=:c AND periode=:p"),
+                                        text(
+                                            "DELETE FROM external_data "
+                                            "WHERE cabang = :c AND periode = :p"
+                                        ),
                                         dels,
                                     )
                             
                             st.success("Perubahan tersimpan.")
                             try:
-                                st.toast("Database updated.", icon="✅")
+                                st.toast("Database external_data diperbarui.", icon="✅")
                             except Exception:
                                 pass
 
@@ -663,6 +676,5 @@ with tab_external:
                             fn=save_ext,
                         )
 
-                    # 3. KOLOM KANAN: SPACER
                     with cb_spc:
                         st.empty()

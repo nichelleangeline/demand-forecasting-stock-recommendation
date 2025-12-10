@@ -14,27 +14,75 @@ from app.ui.theme import inject_global_theme, render_sidebar_user_and_logout
 from app.services.auth_guard import require_login
 from app.services.model_service import get_all_model_runs
 from app.loading_utils import init_loading_css
+from app.services.page_loader import page_loading, init_page_loader_css
 
-# =========================================================
-# PAGE SETUP
-# =========================================================
+
+# Konfigurasi halaman dashboard utama
 st.set_page_config(
     page_title="Dashboard Perencanaan",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-require_login()
-inject_global_theme()
-render_sidebar_user_and_logout()
-init_loading_css()
+# CSS untuk overlay loader (konten tertutup, sidebar tetap muncul)
+init_page_loader_css()
 
+
+# Ambil data forecast aktif dari database
+with page_loading("Menyiapkan dashboard & mengambil data forecast..."):
+    require_login()
+    inject_global_theme()
+    render_sidebar_user_and_logout()
+    init_loading_css()
+    df_raw, active_model = None, None
+
+    def _load_forecast_data():
+        """Mengambil data dari model_run yang sedang aktif."""
+        active_model_local = None
+        models = get_all_model_runs()
+        if not models:
+            return None, None
+
+        for m in models:
+            if m.get("active_flag") == 1:
+                active_model_local = m
+                break
+
+        if not active_model_local:
+            return None, None
+
+        mid = active_model_local["id"]
+        sql = """
+            SELECT area, cabang, sku, periode, qty_actual, pred_qty, is_future
+            FROM forecast_monthly
+            WHERE model_run_id = :mid
+            ORDER BY periode
+        """
+        with engine.connect() as conn:
+            df_local = pd.read_sql(
+                text(sql),
+                conn,
+                params={"mid": mid},
+                parse_dates=["periode"],
+            )
+
+        if df_local.empty:
+            return None, active_model_local
+
+        df_local["qty_actual"] = pd.to_numeric(df_local["qty_actual"], errors="coerce").fillna(0)
+        df_local["pred_qty"] = pd.to_numeric(df_local["pred_qty"], errors="coerce").fillna(0)
+        df_local["is_future"] = df_local["is_future"].fillna(0).astype(int)
+
+        return df_local, active_model_local
+
+    df_raw, active_model = _load_forecast_data()
+
+# Jika belum login, hentikan eksekusi halaman
 if "user" not in st.session_state:
     st.stop()
 
-# =========================================================
-# CLEAN CSS (Modern, No Icons)
-# =========================================================
+
+# CSS tampilan umum dashboard
 st.markdown(
     """
     <style>
@@ -57,7 +105,6 @@ st.markdown(
         padding-bottom: 2.5rem;
     }
 
-    /* Metric Cards (Top Section) */
     .metric-container {
         display: flex;
         flex-direction: column;
@@ -93,7 +140,6 @@ st.markdown(
         color: #94a3b8;
     }
 
-    /* Input Styling */
     .stSelectbox div[data-baseweb="select"] > div {
         background-color: #ffffff;
         border-radius: 10px;
@@ -101,7 +147,6 @@ st.markdown(
         min-height: 2.4rem;
     }
 
-    /* Tombol download custom */
     .download-btn {
         border: none;
         padding: 0.55rem 1.3rem;
@@ -120,7 +165,6 @@ st.markdown(
         box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
     }
 
-    /* Dataframe styling */
     .stDataFrame {
         border-radius: 12px;
         border: 1px solid #e2e8f0;
@@ -134,9 +178,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# =========================================================
-# HELPER: Chart Theme Styling
-# =========================================================
+
+# Utilitas tema chart dan format angka
 def apply_chart_theme(fig):
     fig.update_layout(
         font_family="Inter, sans-serif",
@@ -174,46 +217,23 @@ def apply_chart_theme(fig):
     return fig
 
 
-# =========================================================
-# LOGIC HELPERS
-# =========================================================
-@st.cache_data(show_spinner=False)
-def load_forecast_data():
-    active_model = None
-    models = get_all_model_runs()
-    if not models:
-        return None, None
-
-    for m in models:
-        if m.get("active_flag") == 1:
-            active_model = m
-            break
-
-    if not active_model:
-        return None, None
-
-    mid = active_model["id"]
-    sql = """
-        SELECT area, cabang, sku, periode, qty_actual, pred_qty, is_future
-        FROM forecast_monthly
-        WHERE model_run_id = :mid
-        ORDER BY periode
-    """
-    with engine.connect() as conn:
-        df = pd.read_sql(text(sql), conn, params={"mid": mid}, parse_dates=["periode"])
-
-    if df.empty:
-        return None, active_model
-
-    df["qty_actual"] = pd.to_numeric(df["qty_actual"], errors="coerce").fillna(0)
-    df["pred_qty"] = pd.to_numeric(df["pred_qty"], errors="coerce").fillna(0)
-    df["is_future"] = df["is_future"].fillna(0).astype(int)
-
-    return df, active_model
+def format_si_short(x: float) -> str:
+    """Ubah 294000 -> '294k', 1200000 -> '1.2M'."""
+    try:
+        v = float(x)
+    except Exception:
+        return "-"
+    av = abs(v)
+    if av >= 1_000_000:
+        return f"{v/1_000_000:.1f}M"
+    if av >= 1_000:
+        return f"{v/1_000:.0f}k"
+    return f"{v:,.0f}"
 
 
+# Query stok_policy dan latest_stock
 def load_stok_policy_with_latest_stock(cabang_filter=None):
-    base_sql = """
+    sql = """
         SELECT
             ls.area,
             sp.cabang,
@@ -229,15 +249,16 @@ def load_stok_policy_with_latest_stock(cabang_filter=None):
     """
     params = {}
     if cabang_filter:
-        base_sql += " AND sp.cabang = :cabang"
+        sql += " AND sp.cabang = :cabang"
         params["cabang"] = cabang_filter
-    base_sql += " ORDER BY sp.cabang, sp.sku"
+    sql += " ORDER BY sp.cabang, sp.sku"
 
     with engine.connect() as conn:
-        df = pd.read_sql(text(base_sql), conn, params=params)
+        df = pd.read_sql(text(sql), conn, params=params)
     return df
 
 
+# Hitung MAPE global dan per cabang-SKU untuk bobot kepercayaan forecast
 def get_mape_global_and_per_sku():
     sql = """
         SELECT cabang, sku, qty_actual, pred_qty
@@ -275,6 +296,7 @@ def get_mape_global_and_per_sku():
     return mape_global, df_grp
 
 
+# Mapping MAPE ke alpha (seberapa agresif target_stock mengikuti forecast)
 def map_mape_to_alpha(mape_value: float) -> float:
     if mape_value is None or np.isnan(mape_value):
         return 0.6
@@ -287,19 +309,13 @@ def map_mape_to_alpha(mape_value: float) -> float:
     return 0.4
 
 
-# =========================================================
-# MAIN APP
-# =========================================================
-df_raw, active_model = load_forecast_data()
-
-# Title TIDAK diganti
+# Header dan filter utama
 st.title("Dashboard Monitoring Penjualan & Forecast")
 
 if df_raw is None or active_model is None:
     st.warning("Data forecast belum tersedia.")
     st.stop()
 
-# ---------------- FILTER ----------------
 with st.container():
     f1, f2, f3 = st.columns([1.5, 1.5, 1.5])
 
@@ -326,7 +342,7 @@ with st.container():
         st.warning("Tidak ada data untuk kombinasi filter ini.")
         st.stop()
 
-# ---------------- METRIC CARDS ----------------
+# Pisahkan histori dan future
 hist_df = df[df["is_future"] == 0]
 future_df = df[df["is_future"] == 1]
 
@@ -338,6 +354,7 @@ last_month = monthly.iloc[-1] if not monthly.empty else 0
 
 
 def clean_metric(col, label, val, sub):
+    """Tampilkan kartu metrik ringkas di bagian atas."""
     col.markdown(
         f"""
         <div class="metric-container">
@@ -350,6 +367,7 @@ def clean_metric(col, label, val, sub):
     )
 
 
+# Kartu ringkasan penjualan dan forecast
 c1, c2, c3, c4 = st.columns(4)
 clean_metric(c1, "Forecast", f"{total_fc:,.0f}", "Total periode future")
 clean_metric(c2, "Aktual", f"{total_act:,.0f}", "Total penjualan")
@@ -358,7 +376,8 @@ clean_metric(c4, "Bulan Terakhir", f"{last_month:,.0f}", "Penjualan bulan terakh
 
 st.write("")
 
-# ---------------- CHART 1: FORECAST VS ACTUAL ----------------
+
+# Grafik perbandingan penjualan dan forecast
 df_chart = (
     df.groupby("periode")[["qty_actual", "pred_qty"]].sum().reset_index()
 )
@@ -390,13 +409,15 @@ else:
     fig_bar.update_layout(barmode="group", height=320)
     st.plotly_chart(apply_chart_theme(fig_bar), use_container_width=True)
 
-# ---------------- CHART 2 & 3: TREND & TOP SKU ----------------
+
+# Tren volume dan Top SKU
 c_left, c_right = st.columns([2, 1])
 
 with c_left:
     st.markdown("#### Tren Volume Gabungan")
     df_trend = df_chart.copy()
     if not df_trend.empty:
+        # Pakai nilai aktual, kalau nol diganti forecast
         df_trend["total"] = np.where(
             df_trend["qty_actual"] > 0,
             df_trend["qty_actual"],
@@ -451,43 +472,53 @@ with c_right:
 
 st.write("")
 
-# =========================================================
-# STOCK SECTION: REKOMENDASI LOGISTIK
-# =========================================================
+
+# Bagian perhitungan rekomendasi stok per cabang-SKU
 st.markdown("### Rekomendasi Order & Penyesuaian Stok")
 
-# -------------------- FILTER TAMBAHAN --------------------
 colh1, colh2 = st.columns([1.2, 1.2])
 
+# Pilih bulan-tahun forecast (bukan angka horizon)
 if not future_df.empty:
-    future_periods = sorted(future_df["periode"].unique())
-    max_horizon = len(future_periods)
+    future_periods = (
+        future_df["periode"]
+        .dt.to_period("M")
+        .drop_duplicates()
+        .sort_values()
+    )
+
+    period_labels = [p.strftime("%b %Y") for p in future_periods]
+    default_idx = len(period_labels) - 1  # default: bulan future paling jauh
+
+    label_to_period = dict(zip(period_labels, future_periods))
+
+    selected_label = colh1.selectbox(
+        "Bulan forecast",
+        period_labels,
+        index=default_idx,
+        help="Pilih bulan dan tahun yang dipakai sebagai dasar perhitungan order.",
+    )
+    selected_period = label_to_period[selected_label]
 else:
-    max_horizon = 1
-
-horizon_options = list(range(1, max_horizon + 1))
-default_idx = len(horizon_options) - 1
-
-horizon = colh1.selectbox(
-    "Horizon (bulan)",
-    horizon_options,
-    index=default_idx,
-    help=f"Jumlah bulan forecast ke depan (maks {max_horizon} bulan)."
-)
+    selected_period = None
+    colh1.info("Belum ada data forecast ke depan.")
 
 status_filter = colh2.selectbox(
     "Status Stok",
-    ["Semua", "Risiko Kekurangan", "Potensi Kelebihan", "Aman", "Stok Tidak Tersedia"],
+    ["Semua", "Risiko Kekurangan", "Potensi Kelebihan", "Aman"],
 )
 
-# -------------------- LOAD DATA --------------------
 cabang_filter = cabang_sel if cabang_sel != "Semua Cabang" else None
-df_stock_raw = load_stok_policy_with_latest_stock(cabang_filter)
+
+# Ambil data stok dan policy dari database
+with page_loading("Mengambil data stok & policy dari database..."):
+    df_stock_raw = load_stok_policy_with_latest_stock(cabang_filter)
 
 if df_stock_raw.empty:
     st.info("Data stok_policy / latest_stock belum tersedia.")
     st.stop()
 
+# Sesuaikan stok dengan filter area dan SKU
 if area_sel != "Semua Area":
     df_stock_raw = df_stock_raw[df_stock_raw["area"] == area_sel]
 if sku_sel != "Semua SKU":
@@ -497,15 +528,13 @@ if df_stock_raw.empty:
     st.info("Tidak ada data stok untuk filter ini.")
     st.stop()
 
-# -------------------- FORECAST FUTURE SESUAI HORIZON --------------------
-if not future_df.empty:
-    future_cut = (
-        future_df.sort_values("periode")
-        .groupby(["cabang", "sku"])
-        .head(horizon)
-    )
+# Hitung forecast bulan yang dipilih per cabang-SKU
+if not future_df.empty and selected_period is not None:
+    df_future_sel = future_df[
+        future_df["periode"].dt.to_period("M") == selected_period
+    ]
     df_future_agg = (
-        future_cut.groupby(["cabang", "sku"], as_index=False)["pred_qty"]
+        df_future_sel.groupby(["cabang", "sku"], as_index=False)["pred_qty"]
         .sum()
         .rename(columns={"pred_qty": "forecast_total"})
     )
@@ -515,8 +544,10 @@ else:
 df_stock = df_stock_raw.merge(df_future_agg, how="left", on=["cabang", "sku"])
 df_stock["forecast_total"] = df_stock["forecast_total"].fillna(0)
 
-# -------------------- MAPE DAN ALPHA --------------------
-mape_global, df_mape = get_mape_global_and_per_sku()
+# Masukkan informasi MAPE untuk bobot alpha
+with page_loading("Mengambil performa model (MAPE) untuk perhitungan alpha..."):
+    mape_global, df_mape = get_mape_global_and_per_sku()
+
 base_mape = mape_global if mape_global is not None else 60.0
 
 if df_mape is not None:
@@ -530,27 +561,32 @@ else:
 
 df_stock["alpha"] = df_stock["mape_used"].apply(map_mape_to_alpha)
 
-# -------------------- PERHITUNGAN LOGISTIK --------------------
+# Pastikan semua kolom numerik sebelum perhitungan
 for c in ["avg_qty", "max_baru", "last_stock", "forecast_total"]:
     df_stock[c] = pd.to_numeric(df_stock[c], errors="coerce")
 
+# Safety stock diambil sebagai 80% dari max_baru
 df_stock["safety_stock"] = (0.8 * df_stock["max_baru"]).round()
 
+# Target stok = max(safety_stock, alpha * forecast bulan terpilih)
 df_stock["target_stock"] = np.maximum(
     df_stock["safety_stock"],
     df_stock["alpha"] * df_stock["forecast_total"]
 ).round()
 
+# Rekomendasi order = target_stock - stok terakhir
 df_stock["rec_order"] = np.where(
     df_stock["last_stock"].notna(),
     np.maximum(df_stock["target_stock"] - df_stock["last_stock"], 0),
     df_stock["target_stock"]
 ).round()
 
+# Coverage bulan = stok terakhir / rata-rata pemakaian
 df_stock["coverage_month"] = (
     df_stock["last_stock"] / df_stock["avg_qty"].replace(0, np.nan)
 ).round(2)
 
+# Klasifikasi status stok
 cond_short = (
     df_stock["last_stock"].notna()
     & (df_stock["last_stock"] < df_stock["safety_stock"])
@@ -567,12 +603,12 @@ df_stock.loc[df_stock["last_stock"].isna(), "Status"] = "Stok Tidak Tersedia"
 
 st.divider()
 
-# -------------------- PERSIAPAN DATA VIEW (FILTER STATUS) --------------------
+# Terapkan filter status stok untuk tampilan
 df_view = df_stock.copy()
 if status_filter != "Semua":
     df_view = df_view[df_view["Status"] == status_filter]
 
-# -------------------- RINGKASAN LOGISTIK (KPI) --------------------
+# KPI singkat kondisi stok
 m1, m2, m3 = st.columns(3)
 
 df_kpi = df_view.copy()
@@ -587,63 +623,91 @@ m1.metric("SKU Risiko Kekurangan", n_short)
 m2.metric("SKU Potensi Kelebihan", n_excess)
 m3.metric("Rata-rata Coverage", f"{avg_cov:.2f} bln")
 
-# -------------------- CHART SHORTAGE & EXCESS --------------------
+
+# Visual prioritas stok: kekurangan dan kelebihan
 st.markdown("### Visual Prioritas Stok")
 
 colA, colB = st.columns(2)
 
 with colA:
-    st.markdown("#### Kekurangan Stok")
+    st.markdown("#### Kekurangan Stok (Prioritas Order)")
 
     shortage = df_view[df_view["Status"] == "Risiko Kekurangan"].copy()
-    shortage = shortage[shortage["rec_order"] > 0].sort_values(
-        "rec_order", ascending=False
-    ).head(15)
+    shortage = shortage[shortage["rec_order"] > 0]
 
     if shortage.empty:
         st.info("Tidak ada SKU kekurangan stok.")
     else:
-        shortage["label"] = shortage["cabang"] + " · " + shortage["sku"]
-        fig_s1 = px.bar(
-            shortage, x="rec_order", y="label",
-            orientation="h", text_auto=".3s"
+        # Gabung per cabang-SKU supaya satu bar per kombinasi
+        shortage_g = (
+            shortage.groupby(["cabang", "sku"], as_index=False)["rec_order"]
+            .sum()
+            .sort_values("rec_order", ascending=False)
+            .head(15)
         )
-        fig_s1.update_traces(marker_color="#ef4444", textposition="outside")
+        shortage_g["label"] = shortage_g["cabang"] + " · " + shortage_g["sku"]
+        shortage_g["rec_text"] = shortage_g["rec_order"].apply(format_si_short)
+
+        fig_s1 = px.bar(
+            shortage_g,
+            x="rec_order",
+            y="label",
+            orientation="h",
+            text="rec_text",
+        )
+        fig_s1.update_traces(
+            marker_color="#ef4444",
+            textposition="outside",
+        )
         fig_s1.update_layout(
             height=400,
             margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_title="Qty Order",
+            xaxis_title="Qty Order Disarankan",
             yaxis_title="Cabang · SKU",
         )
         st.plotly_chart(apply_chart_theme(fig_s1), use_container_width=True)
 
 with colB:
-    st.markdown("#### Kelebihan Stok")
+    st.markdown("#### Potensi Kelebihan Stok")
 
     excess = df_view[df_view["Status"] == "Potensi Kelebihan"].copy()
     excess["excess_qty"] = (excess["last_stock"] - excess["target_stock"]).clip(lower=0)
-    excess = excess[excess["excess_qty"] > 0].sort_values(
-        "excess_qty", ascending=False
-    ).head(15)
+    excess = excess[excess["excess_qty"] > 0]
 
     if excess.empty:
         st.info("Tidak ada SKU kelebihan stok.")
     else:
-        excess["label"] = excess["cabang"] + " · " + excess["sku"]
-        fig_s2 = px.bar(
-            excess, x="excess_qty", y="label",
-            orientation="h", text_auto=".3s"
+        # Gabung per cabang-SKU supaya satu bar per kombinasi
+        excess_g = (
+            excess.groupby(["cabang", "sku"], as_index=False)["excess_qty"]
+            .sum()
+            .sort_values("excess_qty", ascending=False)
+            .head(15)
         )
-        fig_s2.update_traces(marker_color="#22c55e", textposition="outside")
+        excess_g["label"] = excess_g["cabang"] + " · " + excess_g["sku"]
+        excess_g["excess_text"] = excess_g["excess_qty"].apply(format_si_short)
+
+        fig_s2 = px.bar(
+            excess_g,
+            x="excess_qty",
+            y="label",
+            orientation="h",
+            text="excess_text",
+        )
+        fig_s2.update_traces(
+            marker_color="#22c55e",
+            textposition="outside",
+        )
         fig_s2.update_layout(
             height=400,
             margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_title="Perkiraan Kelebihan Qty",
+            xaxis_title="Perkiraan Qty Berlebih",
             yaxis_title="Cabang · SKU",
         )
         st.plotly_chart(apply_chart_theme(fig_s2), use_container_width=True)
 
-# -------------------- TABEL OPERASIONAL (INTERAKTIF) --------------------
+
+# Tabel operasional dan export ke Excel
 st.markdown("#### Daftar Rekomendasi Stok")
 
 cols_show = [
@@ -654,9 +718,21 @@ cols_show = [
     "Status",
 ]
 
-df_display = df_view[cols_show].sort_values(
-    ["Status", "rec_order"], ascending=[True, False]
+# Satukan per Area–Cabang–SKU supaya tidak dobel
+df_display = (
+    df_view[cols_show]
+    .groupby(["area", "cabang", "sku", "Status"], as_index=False)
+    .agg({
+        "last_stock": "first",
+        "safety_stock": "first",
+        "target_stock": "first",
+        "forecast_total": "first",
+        "rec_order": "first",
+        "coverage_month": "first",
+    })
+    .sort_values(["Status", "rec_order"], ascending=[True, False])
 )
+
 
 if df_display.empty:
     st.info("Tidak ada rekomendasi stok untuk kombinasi filter ini.")
@@ -672,44 +748,43 @@ else:
             "last_stock": st.column_config.NumberColumn(
                 "Stok Saat Ini",
                 format="%d",
-                help="Jumlah stok terakhir di gudang"
+                help="Jumlah stok terakhir di gudang",
             ),
             "safety_stock": st.column_config.NumberColumn(
                 "Safety Stock",
                 format="%d",
-                help="Batas minimum stok aman"
+                help="Batas minimum stok aman",
             ),
             "target_stock": st.column_config.NumberColumn(
                 "Target Stok",
                 format="%d",
-                help="Level stok yang diinginkan berdasarkan forecast"
+                help="Level stok yang diinginkan berdasarkan forecast",
             ),
             "forecast_total": st.column_config.NumberColumn(
-                "Forecast (Horizon)",
+                "Forecast (Bulan terpilih)",
                 format="%d",
-                help="Total kebutuhan selama horizon yang dipilih"
+                help="Total kebutuhan pada bulan forecast yang dipilih di atas.",
             ),
             "rec_order": st.column_config.NumberColumn(
                 "Rekomendasi Order",
                 format="%d",
-                help="Qty yang disarankan untuk dipesan"
+                help="Qty yang disarankan untuk dipesan",
             ),
             "coverage_month": st.column_config.ProgressColumn(
                 "Coverage (Bulan)",
                 format="%.2f bln",
                 min_value=0,
                 max_value=6,
-                help="Perkiraan berapa bulan stok cukup (visual dibatasi 6 bulan)"
+                help="Perkiraan berapa bulan stok cukup (visual dibatasi 6 bulan)",
             ),
             "Status": st.column_config.TextColumn(
                 "Status Stok",
                 width="medium",
-                help="Aman / Risiko Kekurangan / Potensi Kelebihan / Stok Tidak Tersedia"
+                help="Aman / Risiko Kekurangan / Potensi Kelebihan / Stok Tidak Tersedia",
             ),
         },
     )
 
-    # -------------------- TOMBOL DOWNLOAD --------------------
     buffer = io.BytesIO()
     df_display.to_excel(buffer, index=False)
     buffer.seek(0)
@@ -721,5 +796,5 @@ else:
         f'download="rekomendasi_stok.xlsx">'
         f'<button class="download-btn">Download Excel Rekomendasi</button></a>'
         f'</div>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )

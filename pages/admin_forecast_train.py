@@ -21,10 +21,10 @@ from app.modeling.lgbm_trainer_cluster import train_lgbm_per_cluster
 from app.services.panel_builder import build_lgbm_full_fullfeat_from_db
 from app.loading_utils import init_loading_css, action_with_loader
 from app.services.auth_guard import require_login
+from app.services.page_loader import init_page_loader_css, page_loading
 
-# =========================================================
-# STREAMLIT SETUP
-# =========================================================
+
+# ---------- STREAMLIT SETUP ----------
 
 st.set_page_config(
     page_title="Admin · Training Forecast",
@@ -32,16 +32,20 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-inject_global_theme()
-init_loading_css()
+# CSS loader untuk overlay loading per-halaman
+init_page_loader_css()
 
-# Guard login
+# Cek sesi login
 require_login()
+
+# Tema global dan sidebar user
+inject_global_theme()
 render_sidebar_user_and_logout()
 
-# =========================================================
-# PATH OUTPUT MODEL
-# =========================================================
+# CSS loader kecil untuk tombol/action
+init_loading_css()
+
+# ---------- PATH OUTPUT MODEL ----------
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODEL_OUT_DIR = PROJECT_ROOT / "outputs" / "Light_Gradient_Boosting_Machine"
@@ -56,9 +60,7 @@ for d in [MODEL_DIR, METRIC_DIR, PLOT_DIR, DIAG_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 
-# =========================================================
-# METRIC FUNCTIONS
-# =========================================================
+# ---------- METRIC FUNCTIONS ----------
 
 def mae(y_true, y_pred):
     y_true = np.asarray(y_true, dtype=float)
@@ -90,9 +92,7 @@ def smape(y_true, y_pred, eps=1e-8):
     return np.mean(2.0 * np.abs(y_true - y_pred) / denom) * 100.0
 
 
-# =========================================================
-# Helper DB: forecast_config
-# =========================================================
+# ---------- Helper DB: forecast_config ----------
 
 def _get_forecast_config_from_db():
     keys = ["TRAIN_END", "TEST_START", "TEST_END"]
@@ -168,9 +168,7 @@ def _get_sales_date_range():
     return min_date, max_date
 
 
-# =========================================================
-# Helper: default train_end untuk SKU profiling
-# =========================================================
+# ---------- Helper: default train_end untuk SKU profiling ----------
 
 def _get_default_train_end_for_profile():
     with engine.connect() as conn:
@@ -192,9 +190,7 @@ def _get_default_train_end_for_profile():
     return date(today.year, today.month, 1)
 
 
-# =========================================================
-# Helper FE kecil
-# =========================================================
+# ---------- Helper FE kecil ----------
 
 def _ensure_basic_flags(panel: pd.DataFrame) -> pd.DataFrame:
     panel = panel.copy()
@@ -228,9 +224,7 @@ def _ensure_rainfall_lag1(panel: pd.DataFrame) -> pd.DataFrame:
     return panel
 
 
-# =========================================================
-# Helper untuk sku_profile
-# =========================================================
+# ---------- Helper untuk sku_profile ----------
 
 def _load_sku_profile() -> pd.DataFrame:
     sql = """
@@ -283,14 +277,11 @@ def _update_eligible_flags(updates: pd.DataFrame) -> int:
     return len(updates)
 
 
-# =========================================================
-# CSS KECIL KHUSUS HALAMAN INI
-# =========================================================
+# ---------- CSS kecil khusus halaman ini ----------
 
 st.markdown(
     """
     <style>
-    /* HEADER AREA */
     .page-header {
         display: flex;
         justify-content: space-between;
@@ -316,8 +307,6 @@ st.markdown(
         color: #4f46e5;
         border: 1px solid #e5e7ff;
     }
-    
-    /* METRIC CARDS */
     .metric-card {
         background-color: #ffffff;
         padding: 14px 18px;
@@ -342,8 +331,6 @@ st.markdown(
         color: #6b7280;
         margin-top: 4px;
     }
-
-    /* SECTION */
     .section-title {
         font-size: 16px;
         font-weight: 600;
@@ -363,7 +350,6 @@ st.markdown(
         color: #6b7280;
         margin-bottom: 0.75rem;
     }
-
     .filter-row {
         display: flex;
         gap: 12px;
@@ -375,13 +361,9 @@ st.markdown(
         font-weight: 500;
         color: #6b7280;
     }
-
-    /* DATAFRAME */
     [data-testid="stDataFrame"] {
         font-size: 12px;
     }
-
-    /* PRIMARY BUTTON (GLOBAL FEEL) */
     .stButton > button[kind="primary"] {
         border-radius: 999px;
         padding: 0.45rem 1.4rem;
@@ -405,7 +387,6 @@ st.markdown(
         background: #111827;
         color: #ffffff;
     }
-    /* ==== STYLE TABEL PROFIL SKU ==== */
     .sku-table [data-testid="stDataFrame"] div[data-testid="cell"] {
         font-size: 12px;
         padding: 4px 6px;
@@ -419,9 +400,29 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# =========================================================
-# GUARD LOGIN & ROLE
-# =========================================================
+
+# ---------- Query awal untuk header (pakai loader, tanpa login/theme) ----------
+
+with page_loading("Menyiapkan Panel Training Forecast..."):
+    with engine.connect() as conn:
+        n_sku_profile_row = conn.execute(
+            text("SELECT COUNT(*) AS n_sku FROM sku_profile")
+        ).mappings().fetchone()
+        n_sku_profile = n_sku_profile_row["n_sku"] if n_sku_profile_row else 0
+
+    min_periode, max_periode = _get_sales_date_range()
+    train_end_cfg, test_start_cfg, test_end_cfg = _get_forecast_config_from_db()
+
+    models_for_header = get_all_model_runs()
+    active_model = None
+    if models_for_header:
+        for m in models_for_header:
+            if m.get("active_flag") == 1:
+                active_model = m
+                break
+
+
+# ---------- Guard login & role (failsafe) ----------
 
 if "user" not in st.session_state:
     st.error("Silakan login dulu.")
@@ -435,19 +436,15 @@ if role != "admin":
     st.error("Halaman ini hanya bisa diakses Admin.")
     st.stop()
 
-# =========================================================
-# HEADER & STYLES
-# =========================================================
+
+# ---------- HEADER & STYLES TAMBAHAN ----------
 
 st.markdown(
     """
     <style>
-    /* Font Global */
     [data-testid="stAppViewContainer"] {
         font-family: 'Poppins', sans-serif;
     }
-
-    /* --- Page Title Area --- */
     .header-container {
         margin-bottom: 25px;
     }
@@ -463,7 +460,6 @@ st.markdown(
         font-size: 14px;
         color: #6B7280;
     }
-    
     .badge-pill {
         background-color: #333333;
         color: #FFFFFF;
@@ -477,7 +473,6 @@ st.markdown(
         vertical-align: middle;
         border: 1px solid #444444;
     }
-
     .card-base {
         height: 160px;
         border-radius: 24px;
@@ -487,21 +482,18 @@ st.markdown(
         justify-content: center;
         position: relative;
     }
-
     .card-black {
         background-color: #000000;
         border: 1px solid #333333;
         box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
         color: #FFFFFF;
     }
-
     .metric-header {
         display: flex;
         align-items: center;
         justify-content: space-between;
         margin-bottom: 8px;
     }
-    
     .metric-label {
         font-size: 11px;
         font-weight: 600;
@@ -510,14 +502,12 @@ st.markdown(
         color: #FFFFFF;
         opacity: 0.6;
     }
-
     .metric-value {
         font-size: 26px;
         font-weight: 700;
         line-height: 1.2;
         color: #FFFFFF;
     }
-    
     .info-tooltip {
         display: inline-flex;
         align-items: center;
@@ -539,7 +529,6 @@ st.markdown(
         background: #FFFFFF;
         color: #000000;
     }
-
     .status-text {
         font-size: 11px;
         margin-top: 8px;
@@ -551,25 +540,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# --- LOGIC DATA ---
-with engine.connect() as conn:
-    n_sku_profile = conn.execute(
-        text("SELECT COUNT(*) AS n_sku FROM sku_profile")
-    ).mappings().fetchone()
-    n_sku_profile = n_sku_profile["n_sku"] if n_sku_profile else 0
-
-min_periode, max_periode = _get_sales_date_range()
-train_end_cfg, test_start_cfg, test_end_cfg = _get_forecast_config_from_db()
-
-models_for_header = get_all_model_runs()
-active_model = None
-if models_for_header:
-    for m in models_for_header:
-        if m.get("active_flag") == 1:
-            active_model = m
-            break
-
-# --- RENDER HEADER ---
 st.markdown(
     """
     <div class="header-container">
@@ -582,7 +552,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# --- METRIC CARDS ---
+# ---------- METRIC CARDS ATAS ----------
+
 col_h1, col_h2, col_h3 = st.columns(3)
 
 with col_h1:
@@ -651,7 +622,8 @@ with col_h3:
 
 st.markdown("---")
 
-# --- TABS ---
+# ---------- TABS UTAMA ----------
+
 tab1, tab2, tab3, tab4 = st.tabs(
     [
         "1. Profil Data",
@@ -661,9 +633,8 @@ tab1, tab2, tab3, tab4 = st.tabs(
     ]
 )
 
-# =========================================================
-# PROFIL DATA
-# =========================================================
+
+# ---------- TAB 1: PROFIL DATA ----------
 
 with tab1:
     st.markdown(
@@ -894,13 +865,9 @@ with tab1:
                 st.session_state["last_profile_refresh_done"] = False
 
 
-# =========================================================
-# ATURAN SELEKSI
-# =========================================================
+# ---------- TAB 2: ATURAN SELEKSI ----------
 
 with tab2:
-
-    # ===== TITLE BAR =====
     st.markdown(
         """
         <div class="section-title">
@@ -926,7 +893,6 @@ with tab2:
     if df_profile.empty:
         st.info("Belum ada data di sku_profile. Bangun profil dulu di tab Profil Data.")
     else:
-        # Rapikan tipe data
         df_profile["eligible_model"] = df_profile["eligible_model"].fillna(0).astype(int)
         df_profile["demand_level"] = df_profile["demand_level"].fillna(0).astype(int)
         df_profile["cluster"] = df_profile["cluster"].fillna(-1).astype(int)
@@ -934,9 +900,7 @@ with tab2:
         df_profile["total_qty"] = df_profile["total_qty"].fillna(0.0).astype(float)
         df_profile["zero_ratio"] = df_profile["zero_ratio"].fillna(0.0).astype(float)
 
-        # =========================================================
         # Aturan otomatis
-        # =========================================================
         with st.container(border=True):
 
             st.markdown(
@@ -973,8 +937,8 @@ with tab2:
                     value=10,
                     key="elig_min_nonzero",
                     help=(
-                        "Minimal berapa bulan dalam histori yang qty-nya > 0 (pernah terjual) untuk 1 cabang-SKU.\n\n"
-                        "Tujuannya supaya SKU yang hampir selalu 0 tapi sekali muncul kecil tidak ikut training."
+                        "Minimal berapa bulan dalam histori yang qty-nya > 0 untuk 1 cabang-SKU.\n\n"
+                        "Tujuannya supaya SKU yang hampir selalu 0 tidak ikut training."
                     ),
                 )
 
@@ -985,12 +949,9 @@ with tab2:
                     value=30.0,
                     key="elig_total_qty",
                     help=(
-                        "Batas minimal total penjualan (qty) untuk 1 cabang-SKU selama PERIODE TRAIN.\n\n"
-                        "- Dihitung per kombinasi cabang + SKU.\n"
-                        "- Dijumlahkan dari semua bulan yang masuk periode train (sampai TRAIN_END).\n"
-                        "- Nilai qty sudah mengikuti pipeline (retur minus sudah dibalik).\n\n"
-                        "Contoh: dalam 36 bulan train, satu SKU cabang A total terjual 18 unit, "
-                        "maka total_qty = 18. Jika batas di sini 30, SKU itu tidak diikutkan training."
+                        "Batas minimal total penjualan (qty) untuk 1 cabang-SKU selama periode train.\n\n"
+                        "Contoh: dalam 36 bulan train, satu SKU total terjual 18 unit, "
+                        "kalau batas di sini 30 maka tidak diikutkan training."
                     ),
                 )
 
@@ -1003,10 +964,8 @@ with tab2:
                     step=0.05,
                     key="elig_max_zero_ratio",
                     help=(
-                        "Batas maksimum proporsi bulan tanpa penjualan (qty = 0) terhadap total bulan histori.\n\n"
-                        "- 0.0  = tidak pernah kosong (tiap bulan selalu ada penjualan)\n"
-                        "- 0.7  = maksimal 70% bulan histori boleh kosong\n"
-                        "- 1.0  = boleh 100% kosong (praktis filter ini dimatikan)\n"
+                        "Batas maksimum proporsi bulan tanpa penjualan.\n"
+                        "0.7 = maksimal 70% bulan histori boleh kosong."
                     ),
                 )
 
@@ -1067,23 +1026,19 @@ with tab2:
                 else:
                     st.info("Tidak ada perubahan eligibility.")
 
-        # =========================================================
         # Edit manual
-        # =========================================================
-        
+
         st.markdown("### Edit Kelayakan SKU Manual")
         st.markdown(
             """
             <p style="color:gray; font-size:0.9rem; margin-top:-10px;">
-            Override keputusan sistem. Tentukan secara manual SKU mana yang <b>wajib ikut</b> atau <b>diabaikan</b> dalam training.
+            Override keputusan sistem. Tentukan secara manual SKU mana yang ikut atau di-skip saat training.
             </p>
             """, 
             unsafe_allow_html=True
         )
 
         with st.container(border=True):
-            
-            # Ringkasan
             st.markdown("**Ringkasan Database**")
             m1, m2, m3, m4 = st.columns(4)
             
@@ -1100,7 +1055,7 @@ with tab2:
                     label="Status Eligible",
                     value=f"{total_eligible:,}",
                     delta="Siap Training",
-                    help="Jumlah SKU yang saat ini statusnya 'Ikut Training' (dicentang)."
+                    help="Jumlah SKU yang statusnya ikut training."
                 )
 
             with m3:
@@ -1108,7 +1063,7 @@ with tab2:
                 st.metric(
                     label="Rata-rata Data Kosong",
                     value=f"{avg_sparsity:.1%}",
-                    help="Rata-rata persentase bulan tanpa penjualan di seluruh SKU."
+                    help="Rata-rata persentase bulan tanpa penjualan."
                 )
                 
             with m4:
@@ -1116,8 +1071,7 @@ with tab2:
 
             st.divider()
 
-            # Filter
-            st.markdown("**Filter Pencarian**", help="Gunakan filter di bawah untuk mempersempit tabel edit.")
+            st.markdown("**Filter Pencarian**")
             
             c_filter1, c_filter2, c_filter3, c_filter4 = st.columns(4)
 
@@ -1170,7 +1124,6 @@ with tab2:
             if len(view_df) != len(df_profile):
                 st.caption(f"🔍 Menampilkan **{len(view_df)}** baris hasil filter.")
 
-            # Tabel editable
             edited_df = st.data_editor(
                 view_df[[
                     "id",
@@ -1191,7 +1144,7 @@ with tab2:
                     "eligible_model": st.column_config.CheckboxColumn(
                         "Ikut Training?",
                         width="small",
-                        help="Centang untuk menyertakan SKU ini dalam training model forecast.",
+                        help="Centang untuk menyertakan SKU ini dalam training.",
                     ),
                     "cabang": st.column_config.TextColumn("Cabang", width="small"),
                     "sku": st.column_config.TextColumn("SKU Product", width="medium"),
@@ -1218,13 +1171,12 @@ with tab2:
                         format="%.2f",
                         min_value=0,
                         max_value=1,
-                        help="Semakin penuh bar, semakin jarang SKU ini terjual (banyak nol)."
+                        help="Semakin penuh bar, semakin sering kosong (banyak nol)."
                     ),
                 },
                 key="editor_eligible_sku",
             )
 
-            # Tombol simpan
             st.markdown("<br>", unsafe_allow_html=True)
             col_btn, _ = st.columns([1, 4])
             
@@ -1266,9 +1218,7 @@ with tab2:
                 st.session_state["save_eligible_msg"] = None
 
 
-# =========================================================
-# KONFIGURASI & TRAINING
-# =========================================================
+# ---------- TAB 3: KONFIGURASI & TRAINING ----------
 
 with tab3:
     st.markdown(
@@ -1282,8 +1232,6 @@ with tab3:
         """,
         unsafe_allow_html=True,
     )
-
-    min_periode, max_periode = _get_sales_date_range()
 
     if min_periode is None or max_periode is None:
         st.error("Data penjualan tidak ditemukan. Silakan upload data sales_monthly terlebih dahulu.")
@@ -1731,9 +1679,7 @@ with tab3:
             )
 
 
-# =========================================================
-# RIWAYAT / MANAJEMEN MODEL
-# =========================================================
+# ---------- TAB 4: RIWAYAT / MANAJEMEN MODEL ----------
 
 with tab4:
     st.markdown(
@@ -1755,7 +1701,6 @@ with tab4:
         if "trained_at" in df_models.columns:
             df_models = df_models.sort_values("trained_at", ascending=False)
 
-        # reset index supaya selaras dengan selection row
         df_models = df_models.reset_index(drop=True)
 
         if "global_train_rmse" in df_models.columns and "global_test_rmse" in df_models.columns:

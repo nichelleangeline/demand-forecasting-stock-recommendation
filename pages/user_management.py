@@ -5,6 +5,7 @@ import pandas as pd
 
 from app.ui.theme import inject_global_theme, render_sidebar_user_and_logout
 from app.loading_utils import init_loading_css, action_with_loader
+from app.services.page_loader import init_page_loader_css, page_loading
 
 from app.services.user_management_service import (
     get_all_users,
@@ -22,28 +23,27 @@ from app.services.auth_service import (
 from app.services.auth_guard import require_login
 
 
-# =========================================================
-# KONFIGURASI HALAMAN & THEME GLOBAL
-# =========================================================
-
+# Konfigurasi halaman
 st.set_page_config(
     page_title="Manajemen Pengguna",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-require_login()
-inject_global_theme()
-render_sidebar_user_and_logout()
-init_loading_css()
+# Loader CSS khusus page loader
+init_page_loader_css()
 
-# =========================================================
-# CSS KHUSUS KOMPONEN (TIDAK MENYENTUH .stApp / SIDEBAR)
-# =========================================================
+# Setup awal dibungkus loader biar transisi halus
+with page_loading("Menyiapkan halaman Manajemen Pengguna..."):
+    require_login()
+    inject_global_theme()
+    render_sidebar_user_and_logout()
+    init_loading_css()
+
+# CSS khusus komponen (tidak menyentuh .stApp / sidebar)
 st.markdown(
     """
     <style>
-    /* KPI CARD */
     .kpi-card {
         background-color: #ffffff;
         border-radius: 10px;
@@ -99,7 +99,6 @@ st.markdown(
         color: #1d4ed8;
     }
 
-    /* WARNING BOX DELETE */
     .delete-warning-box {
         background-color: #fff7ed;
         border-radius: 8px;
@@ -119,7 +118,6 @@ st.markdown(
         margin-bottom: 10px;
     }
 
-    /* SECTION WRAPPER UNTUK RESET PASSWORD */
     .section-wrapper {
         background-color: #ffffff;
         border-radius: 10px;
@@ -139,7 +137,6 @@ st.markdown(
         align-items: center;
     }
 
-    /* ICON INFO KECIL */
     .info-icon {
         display: inline-flex;
         align-items: center;
@@ -160,7 +157,6 @@ st.markdown(
         color: #1e293b;
     }
 
-    /* TABEL RESET PASSWORD */
     .reset-table div[data-testid="stDataFrame"] {
         border-radius: 10px;
         border: 1px solid #e5e7eb;
@@ -193,17 +189,43 @@ st.markdown(
         background-color: #eef2ff;
     }
 
-    /* Hapus index dataframe (tabel user utama) */
     thead tr th:first-child { display: none; }
     tbody th { display: none; }
+
+    div[data-testid="stTextInput"] input {
+        background-color: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+    }
+
+    div[data-testid="stTextInput"] input:focus {
+        outline: none;
+        border-color: #0f172a;
+        box-shadow: 0 0 0 1px rgba(15,23,42,0.08);
+    }
+
+    div[data-testid="stSelectbox"] > div[data-baseweb="select"] {
+        background-color: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        min-height: 38px;
+    }
+
+    div[data-testid="stSelectbox"] > div[data-baseweb="select"] div {
+        background-color: transparent;
+    }
+
+    div[data-testid="stSelectbox"] > div[data-baseweb="select"]:focus-within {
+        outline: none;
+        border-color: #0f172a;
+        box-shadow: 0 0 0 1px rgba(15,23,42,0.08);
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# =========================================================
-# CEK LOGIN (HANYA ADMIN)
-# =========================================================
+# Cek login dan role
 if "user" not in st.session_state:
     st.error("Sesi habis. Silakan login lagi.")
     st.stop()
@@ -213,22 +235,18 @@ if current_user.get("role") != "admin":
     st.error("Maaf, Anda tidak punya akses ke halaman ini.")
     st.stop()
 
-# =========================================================
-# DATA USER + DATA RESET PASSWORD (UNTUK KPI)
-# =========================================================
+# Ambil data user dan reset password
+with page_loading("Mengambil data akun & status reset password..."):
+    users = get_all_users() or []
+    total_users = len(users)
+    total_admins = len([u for u in users if u["role"] == "admin"])
+    total_active = len([u for u in users if u.get("is_active", 1)])
 
-users = get_all_users() or []
-total_users = len(users)
-total_admins = len([u for u in users if u["role"] == "admin"])
-total_active = len([u for u in users if u.get("is_active", 1)])
+    cleanup_reset_codes()
+    reset_active_codes = get_pending_reset_codes() or []
+    total_active_reset = len(reset_active_codes)
 
-cleanup_reset_codes()
-reset_active_codes = get_pending_reset_codes() or []
-total_active_reset = len(reset_active_codes)
-
-# =========================================================
-# HEADER + KPI CARD
-# =========================================================
+# Header + KPI
 st.title("Manajemen Pengguna")
 
 k1, k2, k3, k4 = st.columns(4)
@@ -290,16 +308,11 @@ with k4:
 
 st.markdown("---")
 
-# =========================================================
-# TABS
-# =========================================================
 tab_list, tab_create, tab_reset = st.tabs(
     ["Daftar Akun", "Buat Akun Baru", "Manajemen Reset Password"]
 )
 
-# ---------------------------------------------------------
-# TAB 1: DAFTAR & EDIT AKUN
-# ---------------------------------------------------------
+# TAB 1: daftar & edit akun
 with tab_list:
     f_col, s_col = st.columns([2, 2])
     with f_col:
@@ -512,9 +525,7 @@ with tab_list:
                         "Hapus permanen hanya tersedia untuk akun yang sudah dinonaktifkan."
                     )
 
-# ---------------------------------------------------------
-# TAB 2: BUAT AKUN BARU
-# ---------------------------------------------------------
+# TAB 2: buat akun baru
 with tab_create:
     st.subheader("Buat Akun Baru")
 
@@ -572,48 +583,53 @@ with tab_create:
                 except Exception as e:
                     st.error(str(e))
 
-# ---------------------------------------------------------
-# TAB 3: MANAJEMEN RESET PASSWORD
-# ---------------------------------------------------------
+# TAB 3: manajemen reset password
 with tab_reset:
     st.subheader("Manajemen Reset Password")
 
     cleanup_reset_codes()
     active_code = get_pending_reset_codes() or []
 
-    # --------- SECTION: GENERATE KODE LANGSUNG ---------
     st.markdown(
         """
         <div class="section-wrapper">
           <div class="section-title">
             Generate Kode Reset
             <span class="info-icon"
-                  title="Pilih user lalu klik tombol untuk membuat kode reset. Kode akan kadaluarsa otomatis setelah waktu tertentu.">?</span>
+                  title="Pilih user aktif lalu klik tombol untuk membuat kode reset. Kode akan kadaluarsa otomatis setelah waktu tertentu.">?</span>
           </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    if not users:
-        st.info("Tidak ada user yang terdaftar.")
+    active_users_only = [u for u in users if u.get("is_active", 1)]
+
+    if not active_users_only:
+        st.info("Tidak ada user aktif yang dapat dibuatkan kode reset.")
     else:
-        email_list = [u["email"] for u in users]
+        email_list = [u["email"] for u in active_users_only]
         selected_email = st.selectbox(
             "Pilih user untuk dibuatkan kode reset:", email_list
         )
 
         if st.button("Generate Kode Reset", type="primary"):
-            try:
-                code = admin_approve_reset(selected_email, ttl_minutes=30)
-                st.success(f"Kode reset untuk {selected_email} berhasil dibuat: {code}")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Gagal membuat kode reset: {e}")
+            target_user = next((u for u in users if u["email"] == selected_email), None)
+
+            if not target_user:
+                st.error("User tidak ditemukan.")
+            elif not target_user.get("is_active", 1):
+                st.error("Akun sudah nonaktif, tidak bisa dibuatkan kode reset.")
+            else:
+                try:
+                    code = admin_approve_reset(selected_email, ttl_minutes=30)
+                    st.success(f"Kode reset untuk {selected_email} berhasil dibuat: {code}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Gagal membuat kode reset: {e}")
 
     st.markdown("---")
 
-    # --------- SECTION: KODE RESET AKTIF ---------
     st.markdown(
         """
         <div class="section-wrapper">

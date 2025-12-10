@@ -13,12 +13,9 @@ from app.ui.theme import inject_global_theme, render_sidebar_user_and_logout
 from app.services.model_service import get_all_model_runs
 from app.services.forecast_service import generate_and_store_forecast
 from app.loading_utils import init_loading_css
-from app.services.auth_guard import require_login  # guard standar
+from app.services.auth_guard import require_login
+from app.services.page_loader import page_loading, init_page_loader_css
 
-
-# =========================================================
-# HELPER: LAST FORECAST GENERATION INFO
-# =========================================================
 
 def _get_last_forecast_generated(model_run_id: int):
     """
@@ -45,9 +42,7 @@ def _set_last_forecast_generated(
     user_id: int | None,
     when: dt.datetime | None = None,
 ):
-    """
-    Simpan timestamp terakhir generate forecast future ke forecast_config.
-    """
+    """Simpan timestamp terakhir generate forecast future ke forecast_config."""
     if when is None:
         when = dt.datetime.now()
 
@@ -70,28 +65,24 @@ def _set_last_forecast_generated(
         )
 
 
-# =========================================================
-# PAGE SETUP
-# =========================================================
+# Setup halaman
 st.set_page_config(
     page_title="Forecast Penjualan",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
 
-# Guard login
-require_login()
+# Loader overlay nempel di konten utama
+init_page_loader_css()
 
-# Tema global
-inject_global_theme()
+# Setup awal pakai loader
+with page_loading("Menyiapkan halaman Forecast..."):
+    require_login()
+    inject_global_theme()
+    render_sidebar_user_and_logout()
+    init_loading_css()
 
-# Sidebar user + logout
-render_sidebar_user_and_logout()
-
-# CSS loading / spinner
-init_loading_css()
-
-# Double guard
+# Guard session
 if "user" not in st.session_state:
     st.error("Silakan login dulu.")
     st.stop()
@@ -101,10 +92,35 @@ user_id = user.get("user_id")
 role = user.get("role", "user")
 is_admin = str(role).lower() == "admin"
 
+# Header & info model aktif
+with page_loading("Mengambil model aktif dan konfigurasi forecast..."):
+    models = get_all_model_runs()
+    active_model = None
+    if models:
+        for m in models:
+            if m.get("active_flag") == 1:
+                active_model = m
+                break
 
-# =========================================================
-# CUSTOM CSS
-# =========================================================
+col_head1, col_head2 = st.columns([2, 1])
+
+with col_head1:
+    st.title("Forecast Data Penjualan")
+    st.caption("Pantau histori penjualan dan forecast stok per cabang & SKU.")
+
+with col_head2:
+    if not active_model:
+        st.warning("Belum ada model aktif. Set dulu di halaman Training / Kontrol Forecast.")
+    else:
+        with st.container(border=True):
+            st.markdown(f"**Model Aktif:** {active_model['model_type']} (ID {active_model['id']})")
+            st.caption(f"Train: {active_model.get('train_start')} s/d {active_model.get('train_end')}")
+            st.caption(f"Test: {active_model.get('test_start')} s/d {active_model.get('test_end')}")
+
+if not active_model:
+    st.stop()
+
+# CSS kecil untuk kartu & input
 st.markdown(
     """
     <style>
@@ -135,10 +151,7 @@ st.markdown(
         color: #9ca3af;
         margin-top: 4px;
     }
-    /* Hide default plotly modebar */
     .modebar { display: none !important; }
-
-    /* Dropdown putih */
     [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
         background-color: #ffffff !important;
     }
@@ -147,42 +160,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
-# =========================================================
-# HEADER & MODEL INFO
-# =========================================================
-
-models = get_all_model_runs()
-active_model = None
-if models:
-    for m in models:
-        if m.get("active_flag") == 1:
-            active_model = m
-            break
-
-col_head1, col_head2 = st.columns([2, 1])
-
-with col_head1:
-    st.title("Forecast Data Penjualan")
-    st.caption("Pantau histori penjualan dan forecast stok per cabang & SKU.")
-
-with col_head2:
-    if not active_model:
-        st.warning("Belum ada model aktif. Set dulu di halaman Training / Kontrol Forecast.")
-    else:
-        with st.container(border=True):
-            st.markdown(f"**Model Aktif:** {active_model['model_type']} (ID {active_model['id']})")
-            st.caption(f"Train: {active_model.get('train_start')} s/d {active_model.get('train_end')}")
-            st.caption(f"Test: {active_model.get('test_start')} s/d {active_model.get('test_end')}")
-
-if not active_model:
-    st.stop()
-
-
-# =========================================================
-# SECTION 1: FORECAST GENERATION
-# =========================================================
-
+# Panel generate forecast future
 last_val, last_by, last_at = _get_last_forecast_generated(active_model["id"])
 
 with st.expander("Generate Forecast Future & Simpan ke Database", expanded=False):
@@ -225,42 +203,39 @@ with st.expander("Generate Forecast Future & Simpan ke Database", expanded=False
         except Exception as e:
             st.error(f"Gagal generate forecast: {e}")
 
-
-# =========================================================
-# LOAD DATA
-# =========================================================
-
-with engine.connect() as conn:
-    df = pd.read_sql(
-        text(
-            """
-            SELECT
-                model_run_id,
-                area,
-                cabang,
-                sku,
-                periode,
-                qty_actual,
-                pred_qty,
-                is_train,
-                is_test,
-                is_future,
-                horizon
-            FROM forecast_monthly
-            WHERE model_run_id = :mid
-            ORDER BY cabang, sku, periode
-            """
-        ),
-        conn,
-        params={"mid": active_model["id"]},
-        parse_dates=["periode"],
-    )
+# Load data forecast dari DB
+with page_loading("Memuat data forecast dari database..."):
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text(
+                """
+                SELECT
+                    model_run_id,
+                    area,
+                    cabang,
+                    sku,
+                    periode,
+                    qty_actual,
+                    pred_qty,
+                    is_train,
+                    is_test,
+                    is_future,
+                    horizon
+                FROM forecast_monthly
+                WHERE model_run_id = :mid
+                ORDER BY cabang, sku, periode
+                """
+            ),
+            conn,
+            params={"mid": active_model["id"]},
+            parse_dates=["periode"],
+        )
 
 if df.empty:
     st.warning("Data forecast kosong. Jalankan generate forecast dulu.")
     st.stop()
 
-# Type Conversion
+# Normalisasi tipe data
 df["qty_actual"] = pd.to_numeric(df["qty_actual"], errors="coerce")
 df["pred_qty"] = pd.to_numeric(df["pred_qty"], errors="coerce")
 df["is_train"] = df["is_train"].astype(int)
@@ -271,16 +246,12 @@ df["horizon"] = df["horizon"].fillna(0).astype(int)
 future_mask = df["is_future"] == 1
 has_future = future_mask.any()
 
-
-# =========================================================
-# SECTION 2: FILTERS
-# =========================================================
+# Filter tampilan
 st.markdown("### Filter Tampilan")
 
 with st.container(border=True):
     f1, f2, f3, f4 = st.columns(4)
 
-    # Rentang periode
     with f1:
         view_mode = st.selectbox(
             "Rentang Periode",
@@ -288,7 +259,6 @@ with st.container(border=True):
             index=0,
         )
 
-    # Max horizon future, dinamis & rata dengan yang lain
     with f2:
         if has_future:
             max_future_h = int(df.loc[future_mask, "horizon"].max())
@@ -300,7 +270,7 @@ with st.container(border=True):
                 options=horizon_options,
                 index=default_idx,
                 format_func=lambda x: f"{x}",
-                help="Pilih sampai bulan ke berapa forecast future ditampilkan. Contoh: 3 = 3 bulan ke depan.",
+                help="Pilih sampai bulan ke berapa forecast future ditampilkan.",
             )
         else:
             view_horizon = None
@@ -311,7 +281,6 @@ with st.container(border=True):
                 disabled=True,
             )
 
-    # Cabang (wajib 1)
     with f3:
         cabang_list = sorted(df["cabang"].dropna().unique().tolist())
         if not cabang_list:
@@ -324,7 +293,6 @@ with st.container(border=True):
             index=0,
         )
 
-    # SKU (wajib 1)
     with f4:
         df_for_sku = df[df["cabang"] == cabang_selected]
         sku_list = sorted(df_for_sku["sku"].dropna().unique().tolist())
@@ -338,7 +306,6 @@ with st.container(border=True):
             index=0,
         )
 
-# Apply filter
 df_view = df.copy()
 df_view = df_view[df_view["cabang"] == cabang_selected]
 df_view = df_view[df_view["sku"] == sku_selected]
@@ -360,11 +327,7 @@ if df_view.empty:
     st.warning("Data kosong setelah filter. Coba ubah filter.")
     st.stop()
 
-
-# =========================================================
-# SECTION 3: KPI CARDS
-# =========================================================
-
+# KPI kecil di atas grafik
 def _mape(y_true, y_pred, eps=1e-8):
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
@@ -419,10 +382,7 @@ render_card(
     color="#2563eb",
 )
 
-
-# =========================================================
-# SECTION 4: CHART
-# =========================================================
+# Grafik tren aktual vs prediksi
 st.markdown("### Visualisasi Tren & Prediksi")
 
 with st.container(border=True):
@@ -451,8 +411,8 @@ with st.container(border=True):
             color="series",
             markers=True,
             color_discrete_map={
-                "Aktual": "#2563eb",   # biru
-                "Prediksi": "#f97316"  # oranye
+                "Aktual": "#2563eb",
+                "Prediksi": "#f97316",
             },
             labels={"periode": "Periode", "qty": "Qty", "series": ""},
         )
@@ -482,10 +442,7 @@ with st.container(border=True):
 
         st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-
-# =========================================================
-# SECTION 5: TABLE & DOWNLOAD
-# =========================================================
+# Tabel & download CSV
 st.markdown("### Detail Data Forecast")
 
 with st.container(border=True):
