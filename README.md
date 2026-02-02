@@ -2,7 +2,7 @@
 
 Sistem ini dikembangkan sebagai bagian dari skripsi berjudul:
 
-**“Prediksi Permintaan Produk Cat Menggunakan Temporal Fusion Transformer dan Light Gradient Boosting Machine pada PT Tirtakencana Tatawarna”**
+**“Prediksi Permintaan Produk Cat Menggunakan Temporal Fusion Transformer dan Light Gradient Boosting Machine pada Perusahaan Distributor Cat di Indonesia”**
 
 Sistem bertujuan untuk membantu divisi logistik dalam memprediksi permintaan produk, memantau kondisi stok, serta memberikan rekomendasi jumlah pemesanan berdasarkan hasil peramalan dan kebijakan stok perusahaan.
 
@@ -109,4 +109,5 @@ Selain menampilkan hasil forecast, sistem juga menghitung:
 ---
 
 ## 📂 Struktur Repository (Ringkas)
+
 
