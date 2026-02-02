@@ -1,6 +1,3 @@
---   & "C:\Program Files\MySQL\MySQL Server 8.4\bin\mysql.exe" -u root -p 
--- SOURCE D:/Documents/Skripsi/demand-forecasting/app/tktw_schema.sql;
-
 CREATE DATABASE IF NOT EXISTS tktw_db
   DEFAULT CHARACTER SET utf8mb4
   DEFAULT COLLATE utf8mb4_unicode_ci;
@@ -235,12 +232,12 @@ CREATE TABLE stok_policy (
     cabang       VARCHAR(10),
     sku          VARCHAR(100),
 
-    avg_qty      DOUBLE,   -- Average pemakaian/bulan
-    max_lama     DOUBLE,   -- Max lama (sebelum revisi)
-    index_lt     DOUBLE,   -- Index lead time (misal 1.68 / 2.10 / dll)
+    avg_qty      DOUBLE,   
+    max_lama     DOUBLE,   
+    index_lt     DOUBLE,   
 
-    proyeksi_max_baru DOUBLE,  -- akan kita isi
-    growth            DOUBLE,  -- akan kita isi
-    max_baru          DOUBLE   -- akan kita isi
+    proyeksi_max_baru DOUBLE,  
+    growth            DOUBLE,  
+    max_baru          DOUBLE  
 );
 
