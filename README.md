@@ -106,8 +106,5 @@ Selain menampilkan hasil forecast, sistem juga menghitung:
 - Filter interaktif (area, cabang, SKU, periode)
 - Tampilan ringkasan risiko kekurangan dan kelebihan stok
 
----
-
-## 📂 Struktur Repository (Ringkas)
 
 
