@@ -2,11 +2,6 @@ import pandas as pd
 from sqlalchemy import text
 from app.db import engine
 
-
-# ============================================================
-# 1. Ambil dataset forecast_result + latest_stock + config_cabang
-# ============================================================
-
 def load_dashboard_data():
     sql = text("""
         SELECT 
@@ -29,11 +24,6 @@ def load_dashboard_data():
 
     df["periode"] = pd.to_datetime(df["periode"])
     return df
-
-
-# ============================================================
-# 2. Hitung Safety Stock (6 bulan terakhir per cabang,sku)
-# ============================================================
 
 def compute_safety_stock(df):
     out_rows = []
@@ -82,11 +72,6 @@ def status_label(safety_stock, stock_akhir):
         return "Kelebihan Stok"
     return "Normal"
 
-
-# ============================================================
-# 3. KPI hitung (global)
-# ============================================================
-
 def compute_kpi(df_forecast, df_safety):
     total_pred = df_forecast["qty_forecast"].sum()
 
@@ -99,11 +84,6 @@ def compute_kpi(df_forecast, df_safety):
         "count_stockout": len(under),
         "avg_safety_stock": df_safety["safety_stock"].mean().round(2),
     }
-
-
-# ============================================================
-# 4. Master API untuk dashboard
-# ============================================================
 
 def get_dashboard_metrics():
     df = load_dashboard_data()

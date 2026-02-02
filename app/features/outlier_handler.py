@@ -1,5 +1,3 @@
-# app/features/outlier_handler.py
-
 import pandas as pd
 def winsorize_outliers(df: pd.DataFrame, clip_ratio: float = 0.01) -> pd.DataFrame:
     df = df.copy()
@@ -33,6 +31,4 @@ def winsorize_outliers(df: pd.DataFrame, clip_ratio: float = 0.01) -> pd.DataFra
         lambda row: max(min(row["qty"], row["q_high"]), row["q_low"]),
         axis=1,
     )
-
-    # TIDAK DI-DROP. SAMA DENGAN OFFLINE.
     return df

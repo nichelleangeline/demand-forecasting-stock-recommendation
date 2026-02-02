@@ -1,22 +1,12 @@
-# app/services/safety_stock_service.py
-
 from datetime import date
 from typing import Optional
-
 import pandas as pd
 from sqlalchemy import text
-
 from app.db import engine
 
-# =========================
-# LEAD TIME & SALES TOOLS
-# (ini anggap sudah kamu punya, kalau belum ya tambahkan)
-# =========================
 
 def load_leadtime_df() -> pd.DataFrame:
-    """
-    Ambil tabel leadtime_index (cabang, index_value).
-    """
+
     with engine.connect() as conn:
         df = pd.read_sql(
             text("SELECT cabang, index_value FROM leadtime_index"),
@@ -74,15 +64,7 @@ def compute_avg_6m(df_sales: pd.DataFrame) -> pd.DataFrame:
     )
     return agg
 
-# =========================
-# SAFETY STOCK SNAPSHOT
-# =========================
-
 def ensure_safety_stock_snapshot_table():
-    """
-    Pastikan tabel safety_stock_snapshot ada.
-    Pakai definisi yang kamu kirim.
-    """
     create_sql = """
     CREATE TABLE IF NOT EXISTS safety_stock_snapshot (
         id               BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -111,11 +93,6 @@ def load_max_lama_from_history(
     area_filter: list[str] | None = None,
     cabang_filter: list[str] | None = None,
 ) -> pd.DataFrame:
-    """
-    max_lama diambil dari history:
-    max_lama = max_6 dari periode_forecast terakhir < as_of
-    di tabel safety_stock_snapshot.
-    """
     ensure_safety_stock_snapshot_table()
 
     base_sql = """
@@ -146,18 +123,12 @@ def load_max_lama_from_history(
 
 
 def growth_rule(max_lama: float, proyeksi_max_baru: float) -> float:
-    """
-    Placeholder growth: ganti dengan rule Excel kamu nanti.
-    """
     if max_lama is None or pd.isna(max_lama) or max_lama == 0:
         return 1.0
     return (proyeksi_max_baru - max_lama) / max_lama
 
 
 def decide_new_max(max_lama: float, proyeksi_max_baru: float, growth: float) -> float:
-    """
-    Placeholder penentuan max baru: ganti logic sesuai rule merah.
-    """
     if pd.isna(max_lama) or max_lama == 0:
         return proyeksi_max_baru
 
@@ -174,15 +145,6 @@ def compute_safety_stock(
     area_filter: list[str] | None = None,
     cabang_filter: list[str] | None = None,
 ) -> pd.DataFrame:
-    """
-    Hitung:
-      avg_6   = avg qty 6 bulan terakhir
-      max_6   = max baru (setelah growth rule)
-      safety_stock = 0.8 * max_6
-
-    max_lama diambil dari history tabel safety_stock_snapshot (kolom max_6).
-    """
-
     # 1. sales 6 bulan terakhir
     df_sales = load_sales_last_6_months(
         as_of=as_of,
@@ -256,15 +218,6 @@ def update_safety_stock(
     cabang_filter: list[str] | None = None,
     generated_by: int | None = None,
 ) -> pd.DataFrame:
-    """
-    Hitung safety stock dan simpan ke safety_stock_snapshot.
-    Kolom di tabel:
-      periode_forecast = as_of.date()
-      avg_6            = avg_qty_6m
-      max_6            = max_baru
-      safety_stock     = dibulatkan ke int
-    forecast_qty, stok_akhir, reorder_qty, status dibiarkan null/dummy.
-    """
     ensure_safety_stock_snapshot_table()
 
     df_result = compute_safety_stock(

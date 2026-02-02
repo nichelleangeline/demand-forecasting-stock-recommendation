@@ -1,16 +1,10 @@
-# pages/reset_first_login.py
-
 import streamlit as st
-
 from app.loading_utils import init_loading_css
 from app.services.auth_service import (
     get_user_by_email,
     update_password_and_clear_flag,
 )
 
-# =========================================================
-# 1. KONFIGURASI HALAMAN
-# =========================================================
 st.set_page_config(
     page_title="Ganti Password",
     layout="centered",
@@ -19,9 +13,7 @@ st.set_page_config(
 
 init_loading_css()
 
-# =========================================================
-# 2. MODERN CSS (Clean & Formal - No Emojis)
-# =========================================================
+
 st.markdown(
     """
     <style>
@@ -188,9 +180,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# =========================================================
-# 3. LOGIC & STATE CHECK
-# =========================================================
 if "force_change_email" not in st.session_state:
     st.session_state["auth_view"] = "login"
     st.session_state.pop("verify_error", None)
@@ -210,9 +199,6 @@ else:
     title_text = "Ganti Password"
     subtitle_text = "Password Anda perlu diperbarui untuk melanjutkan."
 
-# =========================================================
-# 4. RENDER UI
-# =========================================================
 with st.container():
     st.markdown(
         f"""

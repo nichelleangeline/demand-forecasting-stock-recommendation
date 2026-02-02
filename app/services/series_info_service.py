@@ -1,18 +1,8 @@
-# app/services/series_info_service.py
-
 import pandas as pd
 import numpy as np
 
 
 def compute_series_info_dynamic(panel: pd.DataFrame) -> pd.DataFrame:
-    """
-    Hitung statistik per (cabang, sku) dan flag eligible_model
-    berdasarkan histori TERBARU di panel_global_monthly.
-
-    Asumsi kolom minimal:
-    - cabang, sku, periode, qty
-    """
-
     if panel.empty:
         return pd.DataFrame(columns=[
             "cabang", "sku",
@@ -116,7 +106,7 @@ def compute_series_info_dynamic(panel: pd.DataFrame) -> pd.DataFrame:
         (info["months_since_last_nz"] <= 3)
     ).astype(int)
 
-    # RULE ELIGIBLE (versi sistem)
+    # RULE ELIGIBE
     info["eligible_model"] = (
         (info["n_months"] >= 36) &          # minimal 3 tahun histori
         (info["nonzero_months"] >= 10) &    # tidak super jarang
@@ -131,8 +121,4 @@ def compute_series_info_dynamic(panel: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_series_info(panel: pd.DataFrame, *args, **kwargs) -> pd.DataFrame:
-    """
-    Wrapper kompatibilitas lama.
-    Abaikan argumen tambahan, pakai logic dynamic terbaru.
-    """
     return compute_series_info_dynamic(panel)

@@ -1,35 +1,20 @@
-# app/pipeline/lgbm_global_pipeline.py
-
 import warnings
 warnings.filterwarnings("ignore")
-
 from pathlib import Path
 from typing import Dict
-
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
-
 from sqlalchemy import text
-
 from app.db import engine
-
-# profiling & clustering
 from app.profiling.sku_profiler import build_sku_profile
 from app.profiling.clustering import run_sku_clustering
-
-# feature modules
 from app.features.hierarchy_features import add_hierarchy_features
 from app.features.stabilizer_features import add_stabilizer_features
 from app.features.outlier_handler import winsorize_outliers
-
-# trainer cluster LGBM (tweedie, optuna, log1p)
 from app.modeling.lgbm_trainer_cluster import train_lgbm_per_cluster
 
 
-# =========================================
-# METRIC FUNCTIONS
-# =========================================
 def mae(y_true, y_pred):
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
@@ -60,9 +45,6 @@ def smape(y_true, y_pred, eps=1e-8):
     return np.mean(2.0 * np.abs(y_true - y_pred) / denom) * 100.0
 
 
-# =========================================
-# PATH MODEL OUTPUT (UNTUK SISTEM)
-# =========================================
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 OUT_ROOT   = PROJECT_ROOT / "outputs" / "lgbm_global_clusters_tweedie_noleak"
@@ -73,18 +55,7 @@ for d in [OUT_ROOT, MODEL_DIR, METRIC_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 
-# =========================================
-# STEP 1: LOAD PANEL GLOBAL DARI DB
-# =========================================
-
 def load_panel_from_db() -> pd.DataFrame:
-    """
-    Ambil data bulanan dari DB dan join ke external_data.
-
-    Asumsi tabel:
-    - sales_monthly(area, cabang, sku, periode, qty, ...)
-    - external_data(area, cabang, periode, event_flag, holiday_count, rainfall, ...)
-    """
     sql = """
     SELECT
         s.area,
@@ -103,8 +74,6 @@ def load_panel_from_db() -> pd.DataFrame:
     """
     df = pd.read_sql(text(sql), engine, parse_dates=["periode"])
     df = df.sort_values(["cabang", "sku", "periode"]).reset_index(drop=True)
-
-    # jaga-jaga tipe
     df["qty"] = df["qty"].astype(float)
     df["event_flag"] = df["event_flag"].astype(int)
     df["holiday_count"] = df["holiday_count"].astype(int)
@@ -113,15 +82,7 @@ def load_panel_from_db() -> pd.DataFrame:
     return df
 
 
-# =========================================
-# STEP 2: BUAT FLAG TRAIN / TEST DARI CONFIG
-# =========================================
-
 def add_train_test_flags(df: pd.DataFrame, test_months: int, min_train_months: int = 24) -> pd.DataFrame:
-    """
-    train = semua bulan selain N bulan terakhir
-    test  = N bulan terakhir (global, semua cabang/sku)
-    """
     df = df.copy()
     df["month_key"] = df["periode"].dt.to_period("M")
 
@@ -141,20 +102,7 @@ def add_train_test_flags(df: pd.DataFrame, test_months: int, min_train_months: i
     return df
 
 
-# =========================================
-# STEP 3: BASE FEATURE ENGINEERING (GLOBAL)
-# =========================================
-
 def add_base_ts_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Tambah:
-    - lag qty 1..12
-    - rolling mean/std 3, 6, 12
-    - lag exog (event_flag_lag1, holiday_count_lag1, rainfall_lag1)
-    - calendar (month, year, qtr)
-    - dummy imputed, spike_flag, sample_weight
-      (kalau nanti ada logic benerannya, tinggal ganti di sini)
-    """
     df = df.copy()
     df = df.sort_values(["cabang", "sku", "periode"])
 
@@ -213,23 +161,13 @@ def add_base_ts_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
-# =========================================
-# STEP 4: FULL PIPELINE TRAINING GLOBAL
-# =========================================
-
 def run_global_lgbm_training(
     test_months: int = 4,
     min_train_months: int = 24,
 ) -> Dict[int, str]:
-    """
-    Pipeline training global LGBM dari DB.
 
-    Return dict: {cluster_id: path_model}
-    """
-    print("====================================")
-    print("RUN GLOBAL LGBM TRAINING (NO LEAK, FROM DB)")
-    print("====================================")
+
+    print("RUN GLOBAL LGBM TRAINING")
 
     # 1) Load panel dari DB
     print("[STEP 1] Load panel dari DB ...")
@@ -336,9 +274,7 @@ def run_global_lgbm_training(
             print(f"Cluster {cid} == -1 (unknown), skip.")
             continue
 
-        print("\n====================================")
         print(f"TRAINING CLUSTER {cid}")
-        print("====================================")
 
         model = train_lgbm_per_cluster(
             df=df,
@@ -475,5 +411,4 @@ def run_global_lgbm_training(
 
 
 if __name__ == "__main__":
-    # contoh manual run
     run_global_lgbm_training(test_months=4, min_train_months=24)

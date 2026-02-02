@@ -1,5 +1,3 @@
-# app/register_model_lgbm.py
-
 from pathlib import Path
 from sqlalchemy import text
 import pandas as pd
@@ -15,7 +13,6 @@ global_metrics = OUT_DIR / "lgbm_full_global_tweedie_global_metrics.csv"
 
 
 def main():
-    # baca global metrics hasil training terbaru
     gm = pd.read_csv(global_metrics)
     row = gm.iloc[0]
 
@@ -23,10 +20,8 @@ def main():
     train_end   = row["train_end_date"]
 
     with engine.begin() as conn:
-        # non-aktifkan semua model lama
         conn.execute(text("UPDATE model_registry SET is_active = 0"))
 
-        # daftarkan model baru
         conn.execute(
             text("""
             INSERT INTO model_registry

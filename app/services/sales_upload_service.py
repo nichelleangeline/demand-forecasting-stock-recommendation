@@ -79,9 +79,6 @@ def _preprocess_daily_to_monthly(df_raw: pd.DataFrame) -> pd.DataFrame:
           .agg(qty_net=("qty", "sum"))
     )
 
-    # qty positif pakai logika pipeline offline:
-    #   - qty_net = -40 -> demand 40
-    #   - qty_net = +10 -> demand 0
     g["qty"] = -g["qty_net"]
     g.loc[g["qty"] < 0, "qty"] = 0.0
     g = g.drop(columns=["qty_net"])
@@ -91,11 +88,6 @@ def _preprocess_daily_to_monthly(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 
 def _preprocess_monthly_direct(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Untuk file yang memang sudah bulanan:
-    ekspektasi ada kolom: periode, cabang, sku, qty
-    area akan diisi dari cabang (AREA_MAP) kalau belum ada.
-    """
     cols_lower = {c: c.lower().strip() for c in df_raw.columns}
     df = df_raw.rename(columns=cols_lower)
 
@@ -147,12 +139,6 @@ def preprocess_sales_df(
     df_raw: pd.DataFrame,
     mode: Literal["harian", "bulanan"] = "harian",
 ) -> pd.DataFrame:
-    """
-    Wrapper yang dipanggil dari halaman Streamlit.
-    - mode='harian'  -> pakai _preprocess_daily_to_monthly
-    - mode='bulanan' -> pakai _preprocess_monthly_direct
-    Output selalu: [area, cabang, sku, periode, qty]
-    """
     if mode == "harian":
         return _preprocess_daily_to_monthly(df_raw)
     elif mode == "bulanan":
@@ -164,12 +150,6 @@ def preprocess_sales_df(
 def save_sales_monthly_to_db(df_monthly: pd.DataFrame,
                              source_filename: str,
                              uploaded_by: int) -> int:
-    """
-    Simpan ke sales_monthly.
-    - Kalau (cabang, sku, periode) sudah ada -> qty diganti dengan yang baru.
-    - Kalau belum ada -> insert baris baru.
-    """
-
     if df_monthly.empty:
         return 0
 
@@ -209,22 +189,7 @@ def save_sales_monthly_to_db(df_monthly: pd.DataFrame,
 
     return len(records)
 
-
-# =====================================================
-# Tambahan: ambil stok terakhir dari file HARIAN
-# =====================================================
-
 def _extract_latest_stock_from_daily(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Dari file harian NAV, ambil stok terakhir per area-cabang-sku.
-    Asumsi ada kolom:
-      - Posting Date / posting date / posting_date
-      - Location Code / location code
-      - SKU / Item No.
-      - Stock
-    Output: [area, cabang, sku, last_txn_date, last_stock]
-    """
-
     cols_lower = {c: c.lower().strip() for c in df_raw.columns}
     df = df_raw.rename(columns=cols_lower)
 
@@ -287,11 +252,6 @@ def preprocess_sales_and_stock_df(
     df_raw: pd.DataFrame,
     mode: Literal["harian", "bulanan"] = "harian",
 ):
-    """
-    Versi kombo:
-      - Kembalikan df_monthly (seperti preprocess_sales_df)
-      - DAN df_latest_stock (kalau mode='harian' & ada kolom stock)
-    """
 
     if mode == "harian":
         df_monthly = _preprocess_daily_to_monthly(df_raw)
@@ -309,24 +269,6 @@ def preprocess_sales_and_stock_df(
 def save_latest_stock_to_db(df_latest: pd.DataFrame,
                             source_filename: str,
                             uploaded_by: int) -> int:
-    """
-    Simpan stok terakhir per cabang+sku ke tabel latest_stock.
-    Struktur tabel (contoh):
-
-    CREATE TABLE IF NOT EXISTS latest_stock (
-        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-        area VARCHAR(10) NOT NULL,
-        cabang VARCHAR(10) NOT NULL,
-        sku VARCHAR(100) NOT NULL,
-        last_txn_date DATE NOT NULL,
-        last_stock DOUBLE NOT NULL,
-        source_filename VARCHAR(255),
-        uploaded_by INT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                     ON UPDATE CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_latest_stock (cabang, sku)
-    );
-    """
 
     if df_latest.empty:
         return 0

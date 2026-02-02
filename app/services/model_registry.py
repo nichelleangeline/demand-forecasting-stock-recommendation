@@ -1,22 +1,10 @@
-# app/services/model_registry.py
-
 import json
 from typing import Dict, Any, Optional
-
 from sqlalchemy import text
-
 from app.db import engine
 
 
-# =========================
-# Helper: ambil run aktif
-# =========================
-
 def _get_active_run() -> Optional[Dict[str, Any]]:
-    """
-    Ambil 1 baris model_run yang active_flag = 1, paling baru (trained_at desc).
-    Kolom disesuaikan dengan schema model_run versi DB kamu.
-    """
     sql = """
         SELECT
             id,
@@ -49,32 +37,7 @@ def _get_active_run() -> Optional[Dict[str, Any]]:
     return dict(row)
 
 
-# =========================
-# Public: load_active_models
-# =========================
-
 def load_active_models() -> Optional[Dict[str, Any]]:
-    """
-    Dipakai di forecast_page:
-    - ambil info run aktif (model_run)
-    - ambil daftar model per cluster (model_run_cluster)
-    - parse feature_cols_json
-
-    Return:
-        {
-          "run_info": {...},
-          "cluster_models": {
-              0: {
-                  "model_path": "...",
-                  "train_rmse": ...,
-                  "test_rmse": ...
-              },
-              ...
-          },
-          "feature_cols": [...string kolom fitur...]  # kalau ada
-        }
-    atau None kalau belum ada model aktif.
-    """
     run = _get_active_run()
     if not run:
         return None
@@ -114,7 +77,6 @@ def load_active_models() -> Optional[Dict[str, Any]]:
         }
 
     if not cluster_models:
-        # Secara logika harusnya ada, tapi kalau belum ke-insert ya anggap belum siap
         return None
 
     return {

@@ -1,4 +1,3 @@
-# app/ui_filters.py
 import pandas as pd
 import streamlit as st
 from sqlalchemy import text
@@ -6,10 +5,6 @@ from app.db import engine
 
 
 def load_master_keys():
-    """
-    Ambil distinct cabang & sku dari panel_global_monthly
-    (bukan dari raw penjualan, supaya sinkron sama model & dashboard).
-    """
     sql = text("""
         SELECT DISTINCT cabang, sku
         FROM panel_global_monthly
@@ -25,12 +20,6 @@ def load_master_keys():
 
 
 def sidebar_filters():
-    """
-    Sidebar filter global:
-    - multiselect cabang (searchable, bisa pilih >1, bisa 'All')
-    - multiselect sku   (searchable, bisa pilih >1, bisa 'All')
-    Return: dict {cabang_list or None, sku_list or None}
-    """
     st.sidebar.markdown("### Filter Data")
 
     df_keys = load_master_keys()
@@ -44,7 +33,6 @@ def sidebar_filters():
     ALL_CABANG = "[Semua Cabang]"
     ALL_SKU    = "[Semua SKU]"
 
-    # --------- CABANG ---------
     cabang_options = [ALL_CABANG] + cabang_all
     cabang_selected = st.sidebar.multiselect(
         "Cabang",
@@ -54,11 +42,10 @@ def sidebar_filters():
     )
 
     if (ALL_CABANG in cabang_selected) or (len(cabang_selected) == 0):
-        cabang_filter = None   # artinya: semua cabang
+        cabang_filter = None   
     else:
         cabang_filter = [c for c in cabang_selected if c != ALL_CABANG]
 
-    # --------- SKU (auto filter by cabang kalau mau) ---------
     df_for_sku = df_keys.copy()
     if cabang_filter is not None:
         df_for_sku = df_for_sku[df_for_sku["cabang"].isin(cabang_filter)]

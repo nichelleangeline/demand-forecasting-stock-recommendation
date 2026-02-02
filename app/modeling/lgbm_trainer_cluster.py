@@ -1,5 +1,3 @@
-# app/modeling/lgbm_trainer_cluster.py
-
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -16,14 +14,7 @@ def train_lgbm_per_cluster(
     log_target: bool = True,
     n_trials: int = 40,
 ):
-    """
-    Training LGBM Tweedie untuk satu cluster tertentu.
-    Disamakan dengan script offline:
-    - Target = log1p(qty_wins) kalau log_target == True
-    - Inner train/val split pakai cutoff periode 2024-02-01
-    - Optuna untuk cari hyperparameter, lalu retrain pakai seluruh data train.
-    """
-
+ 
     # Filter data per cluster
     df_c = df[df["cluster"] == cluster_id].copy()
     if df_c.empty:
@@ -57,11 +48,9 @@ def train_lgbm_per_cluster(
     y_train = train_inner["tgt"].values
     y_val   = val_inner["tgt"].values
 
-    # Safety: pastikan numerik
     X_train = X_train.apply(pd.to_numeric, errors="coerce").fillna(0.0)
     X_val   = X_val.apply(pd.to_numeric, errors="coerce").fillna(0.0)
 
-    # ============ Optuna objective ============
     def objective(trial):
         params = get_tweedie_params()
         params.update({
@@ -106,7 +95,6 @@ def train_lgbm_per_cluster(
     final_params = get_tweedie_params()
     final_params.update(best_params)
 
-    # Train final model pakai seluruh data TRAIN cluster
     train_full = df_c[df_c["is_train"] == 1].copy()
     X_full = train_full[feature_cols]
     X_full = X_full.apply(pd.to_numeric, errors="coerce").fillna(0.0)

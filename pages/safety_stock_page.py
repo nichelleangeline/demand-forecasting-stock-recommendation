@@ -1,63 +1,105 @@
-# pages/safety_stock_page.py
-
-import streamlit as st
-import pandas as pd
+import datetime as dt
 import numpy as np
+import pandas as pd
+import streamlit as st
 from sqlalchemy import text
-
-from app.services.page_loader import page_loading, init_page_loader_css
 from app.db import engine
-from app.ui.theme import inject_global_theme, render_sidebar_user_and_logout
-from app.loading_utils import init_loading_css, action_with_loader
-from app.services.stok_policy_service import (
-    build_stok_policy_from_sales_monthly,
-    recompute_stok_policy,
-)
+from app.loading_utils import init_loading_css
 from app.services.auth_guard import require_login
+from app.services.page_loader import init_page_loader_css
+from app.services.stok_policy_service import upsert_stok_policy_from_sales_monthly
+from app.ui.theme import inject_global_theme, render_sidebar_user_and_logout
+
+def _fmt_bulan(d: dt.date) -> str:
+    return pd.Timestamp(d).strftime("%b %Y")
 
 
-# Helper DB & logic stok / policy
-def load_stok_policy_with_latest_stock(cabang_filter=None):
-    """Ambil stok_policy + latest_stock, optional filter per cabang."""
-    base_sql = """
-        SELECT
-            ls.area,
-            sp.cabang,
-            sp.sku,
-            sp.avg_qty,
-            sp.max_lama,
-            sp.index_lt,
-            sp.proyeksi_max_baru,
-            sp.growth,
-            sp.max_baru,
-            ls.last_txn_date,
-            ls.last_stock
-        FROM stok_policy sp
-        LEFT JOIN latest_stock ls
-          ON BINARY sp.cabang = BINARY ls.cabang
-         AND BINARY sp.sku    = BINARY ls.sku
-        WHERE 1=1
+def _safe_date(x) -> dt.date | None:
+    ts = pd.to_datetime(x, errors="coerce")
+    return ts.date() if not pd.isna(ts) else None
+
+
+def _norm_key(s: str) -> str:
+    return str(s).strip().upper()
+
+
+def _eps_denom(arr, eps=1e-8):
+    arr = np.asarray(arr, dtype=float)
+    return np.maximum(np.abs(arr), eps)
+
+
+def map_mape_to_alpha(mape):
+    if pd.isna(mape):
+        return 0.6
+    try:
+        m = float(mape)
+    except Exception:
+        return 0.6
+
+    if m < 20:
+        return 0.9
+    if m < 30:
+        return 0.7
+    if m < 40:
+        return 0.6
+    return 0.4
+
+def get_active_model_run_id() -> int | None:
+    sql = """
+        SELECT id
+        FROM model_run
+        WHERE active_flag = 1
+        ORDER BY trained_at DESC, id DESC
+        LIMIT 1
     """
-    params = {}
-    if cabang_filter:
-        base_sql += " AND sp.cabang = :cabang"
-        params["cabang"] = cabang_filter
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(sql)).fetchone()
+        if row and row[0] is not None:
+            return int(row[0])
+    except Exception:
+        return None
+    return None
 
-    base_sql += " ORDER BY sp.cabang, sp.sku"
 
-    with engine.connect() as conn:
-        df = pd.read_sql(
-            text(base_sql),
-            conn,
-            params=params,
-            parse_dates=["last_txn_date"],
-        )
-    return df
+def get_db_summary(active_model_run_id: int | None):
+    with engine.begin() as conn:
+        n_policy = conn.execute(text("SELECT COUNT(*) FROM stok_policy")).scalar() or 0
+
+        try:
+            sql_sync = """
+                SELECT COUNT(DISTINCT CONCAT(TRIM(UPPER(ls.cabang)), '||', TRIM(UPPER(ls.sku))))
+                FROM latest_stock ls
+                INNER JOIN stok_policy sp
+                  ON TRIM(UPPER(ls.cabang)) COLLATE utf8mb4_unicode_ci = TRIM(UPPER(sp.cabang)) COLLATE utf8mb4_unicode_ci
+                 AND TRIM(UPPER(ls.sku))    COLLATE utf8mb4_unicode_ci = TRIM(UPPER(sp.sku))    COLLATE utf8mb4_unicode_ci
+            """
+            n_stock = conn.execute(text(sql_sync)).scalar() or 0
+        except Exception:
+            n_stock = 0
+
+        try:
+            if active_model_run_id is None:
+                n_months_fc = 0
+            else:
+                n_months_fc = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(DISTINCT periode)
+                        FROM forecast_monthly
+                        WHERE model_run_id = :mid AND is_future = 1
+                        """
+                    ),
+                    {"mid": int(active_model_run_id)},
+                ).scalar() or 0
+        except Exception:
+            n_months_fc = 0
+
+    return {"policy": int(n_policy), "stock": int(n_stock), "fc_months": int(n_months_fc)}
 
 
 def ensure_latest_stock_table():
-    """Pastikan tabel latest_stock ada."""
-    create_sql = """
+    sql = """
     CREATE TABLE IF NOT EXISTS latest_stock (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         area VARCHAR(10) NOT NULL,
@@ -65,858 +107,652 @@ def ensure_latest_stock_table():
         sku VARCHAR(100) NOT NULL,
         last_txn_date DATE NOT NULL,
         last_stock INT NOT NULL,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            ON UPDATE CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uq_latest_stock_acs (area, cabang, sku)
     ) ENGINE=InnoDB;
     """
     with engine.begin() as conn:
-        conn.execute(text(create_sql))
-
-
-UPSERT_LATEST_STOCK_SQL = """
-    INSERT INTO latest_stock (
-        area,
-        cabang,
-        sku,
-        last_txn_date,
-        last_stock
-    )
-    VALUES (
-        :area,
-        :cabang,
-        :sku,
-        :last_txn_date,
-        :last_stock
-    )
-    ON DUPLICATE KEY UPDATE
-        last_txn_date = VALUES(last_txn_date),
-        last_stock    = VALUES(last_stock),
-        area          = VALUES(area)
-"""
+        conn.execute(text(sql))
 
 
 def upsert_latest_stock_records(records):
-    """
-    records: list dict dengan kunci:
-      - cabang
-      - sku
-      - last_txn_date
-      - last_stock
-    Fungsi ini akan isi kolom area dari sales_monthly.
-    """
     if not records:
         return
 
     ensure_latest_stock_table()
 
     with engine.begin() as conn:
-        rows = conn.execute(
-            text("SELECT DISTINCT cabang, area FROM sales_monthly")
-        ).fetchall()
-
-    cabang_to_area = {row.cabang: row.area for row in rows}
+        rows = conn.execute(text("SELECT DISTINCT cabang, area FROM sales_monthly")).fetchall()
+    cabang_to_area = {str(r[0]).strip().upper(): str(r[1]).strip() for r in rows}
 
     enriched = []
     for rec in records:
-        cab = rec["cabang"]
-        new_rec = dict(rec)
-        new_rec["area"] = cabang_to_area.get(cab, "UNKNOWN")
-        enriched.append(new_rec)
+        cab = _norm_key(rec.get("cabang", ""))
+        sku = _norm_key(rec.get("sku", ""))
+        if not cab or not sku:
+            continue
 
-    with engine.begin() as conn:
-        conn.execute(text(UPSERT_LATEST_STOCK_SQL), enriched)
+        area_val = cabang_to_area.get(cab, "UNKNOWN")
 
+        raw_stock = rec.get("last_stock", 0)
+        try:
+            raw_stock = int(float(raw_stock))
+        except Exception:
+            raw_stock = 0
 
-def ensure_stock_history_table():
-    """Pastikan tabel stock_history ada."""
-    create_sql = """
-    CREATE TABLE IF NOT EXISTS stock_history (
-        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-        cabang VARCHAR(10) NOT NULL,
-        sku VARCHAR(100) NOT NULL,
-        periode DATE NOT NULL,
-        stok_akhir INT NOT NULL,
-        source_filename VARCHAR(255),
-        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE KEY uq_stock_hist (cabang, sku, periode)
-    ) ENGINE=InnoDB;
-    """
-    with engine.begin() as conn:
-        conn.execute(text(create_sql))
+        last_txn_date = _safe_date(rec.get("last_txn_date", None)) or dt.date.today()
 
+        enriched.append(
+            {
+                "area": area_val,
+                "cabang": cab,
+                "sku": sku,
+                "last_txn_date": last_txn_date,
+                "last_stock": max(0, raw_stock), 
+            }
+        )
 
-UPSERT_STOCK_HISTORY_SQL = """
-    INSERT INTO stock_history (
-        cabang,
-        sku,
-        periode,
-        stok_akhir,
-        source_filename
-    )
-    VALUES (
-        :cabang,
-        :sku,
-        :periode,
-        :stok_akhir,
-        :source_filename
-    )
-    ON DUPLICATE KEY UPDATE
-        stok_akhir      = VALUES(stok_akhir),
-        source_filename = VALUES(source_filename)
-"""
-
-
-def save_uploaded_stock(df_upload, filename=None):
-    """
-    Simpan hasil upload stok ke DB.
-
-    Mode 1 (history per periode):
-      - Simpan semua baris ke stock_history
-      - Ambil periode terakhir per (cabang, sku) untuk latest_stock
-
-    Mode 2 (snapshot stok terakhir):
-      - Langsung isi latest_stock saja
-    """
-    if df_upload.empty:
+    if not enriched:
         return
 
-    cols = {c.lower().strip(): c for c in df_upload.columns}
+    sql = """
+        INSERT INTO latest_stock (area, cabang, sku, last_txn_date, last_stock)
+        VALUES (:area, :cabang, :sku, :last_txn_date, :last_stock)
+        ON DUPLICATE KEY UPDATE
+            last_txn_date = VALUES(last_txn_date),
+            last_stock    = VALUES(last_stock),
+            area          = VALUES(area)
+    """
+    with engine.begin() as conn:
+        conn.execute(text(sql), enriched)
+
+
+def save_uploaded_stock(df_upload):
+    if df_upload is None or df_upload.empty:
+        return
+
+    cols = {str(c).lower().strip(): c for c in df_upload.columns}
 
     col_sku = cols.get("sku")
-    col_cabang = cols.get("cabang")
-    col_loc = (
-        cols.get("location code")
-        or cols.get("location_code")
-        or cols.get("location")
-    )
+    col_cabang = cols.get("cabang") or cols.get("location code") or cols.get("location") or cols.get("location_code")
+    if not col_sku or not col_cabang:
+        raise ValueError("Kolom SKU dan Cabang/Location wajib ada.")
 
-    if not col_sku:
-        raise ValueError("File harus punya kolom: SKU.")
-    if not (col_cabang or col_loc):
-        raise ValueError("File harus punya kolom: cabang atau Location Code.")
-
-    # Mode 1: history per periode
-    col_periode = (
-        cols.get("periode")
-        or cols.get("posting date")
-        or cols.get("tanggal")
-        or cols.get("date")
-    )
-    col_stock_hist = (
+    col_periode = cols.get("periode") or cols.get("posting date") or cols.get("tanggal") or cols.get("date")
+    col_stock = (
         cols.get("stok_akhir")
-        or cols.get("stock_akhir")
+        or cols.get("last_stock")
         or cols.get("stock")
-        or cols.get("qty_stok")
+        or cols.get("qty")
         or cols.get("quantity")
     )
+    if not col_stock:
+        raise ValueError("Kolom stok tidak ketemu. Pakai salah satu: stok_akhir / last_stock / stock / qty / quantity")
 
-    # Mode 2: snapshot
-    col_stock_snapshot = (
-        cols.get("last_stock")
-        or cols.get("stok_akhir")
-        or cols.get("stock")
-    )
-    col_tanggal_snapshot = (
-        cols.get("last_txn_date")
-        or cols.get("posting date")
-        or cols.get("tanggal")
-        or cols.get("date")
-    )
+    df = df_upload.copy()
 
-    records_latest = []
+    df["cab_clean"] = df[col_cabang].astype(str).str.strip().str.upper()
+    if str(col_cabang).lower().strip() in ["location code", "location_code", "location"]:
+        df["cab_clean"] = df["cab_clean"].str[:3]
 
-    # Mode 1: history
-    if col_periode and col_stock_hist:
-        ensure_stock_history_table()
+    df["sku_clean"] = df[col_sku].astype(str).str.strip().str.upper()
+    df["stok_clean"] = pd.to_numeric(df[col_stock], errors="coerce").fillna(0).astype(int)
 
-        source_cabang_col = col_cabang if col_cabang else col_loc
-        df = df_upload[
-            [source_cabang_col, col_sku, col_periode, col_stock_hist]
-        ].copy()
-        df.columns = ["cabang_src", "sku", "periode", "stok_akhir"]
-
-        df["cabang_src"] = df["cabang_src"].astype(str).str.strip()
-        if col_cabang:
-            df["cabang"] = df["cabang_src"]
-        else:
-            df["cabang"] = df["cabang_src"].str[:3]
-
-        df["sku"] = df["sku"].astype(str).str.strip()
-        df["stok_akhir"] = (
-            pd.to_numeric(df["stok_akhir"], errors="coerce")
-            .fillna(0)
-            .astype(int)
-        )
-        df["periode"] = pd.to_datetime(df["periode"]).dt.date
-
-        df = df[["cabang", "sku", "periode", "stok_akhir"]]
-
-        records_hist = []
-        for _, row in df.iterrows():
-            records_hist.append(
-                {
-                    "cabang": row["cabang"],
-                    "sku": row["sku"],
-                    "periode": row["periode"],
-                    "stok_akhir": int(row["stok_akhir"]),
-                    "source_filename": filename,
-                }
-            )
-
-        if records_hist:
-            with engine.begin() as conn:
-                conn.execute(text(UPSERT_STOCK_HISTORY_SQL), records_hist)
-
-        df_sorted = df.sort_values(["cabang", "sku", "periode"])
-        idx_last = (
-            df_sorted.groupby(["cabang", "sku"])["periode"].transform("max")
-            == df_sorted["periode"]
-        )
-        df_last = df_sorted[idx_last].drop_duplicates(
-            subset=["cabang", "sku"], keep="last"
-        )
-
-        for _, row in df_last.iterrows():
-            records_latest.append(
-                {
-                    "cabang": row["cabang"],
-                    "sku": row["sku"],
-                    "last_stock": int(row["stok_akhir"]),
-                    "last_txn_date": row["periode"],
-                }
-            )
-
-    # Mode 2: snapshot
-    elif col_stock_snapshot and col_tanggal_snapshot:
-        source_cabang_col = col_cabang if col_cabang else col_loc
-        df = df_upload[
-            [source_cabang_col, col_sku, col_stock_snapshot, col_tanggal_snapshot]
-        ].copy()
-        df.columns = ["cabang_src", "sku", "last_stock", "last_txn_date"]
-
-        df["cabang_src"] = df["cabang_src"].astype(str).str.strip()
-        if col_cabang:
-            df["cabang"] = df["cabang_src"]
-        else:
-            df["cabang"] = df["cabang_src"].str[:3]
-
-        df["sku"] = df["sku"].astype(str).str.strip()
-        df["last_stock"] = (
-            pd.to_numeric(df["last_stock"], errors="coerce")
-            .fillna(0)
-            .astype(int)
-        )
-        df["last_txn_date"] = pd.to_datetime(df["last_txn_date"]).dt.date
-
-        for _, row in df.iterrows():
-            records_latest.append(
-                {
-                    "cabang": row["cabang"],
-                    "sku": row["sku"],
-                    "last_stock": int(row["last_stock"]),
-                    "last_txn_date": row["last_txn_date"],
-                }
-            )
+    if col_periode:
+        df["date_clean"] = pd.to_datetime(df[col_periode], errors="coerce").dt.date
     else:
-        raise ValueError(
-            "Format kolom tidak cocok.\n"
-            "- Mode history: butuh SKU, periode/Posting Date, stok_akhir/Stock, dan cabang/Location Code\n"
-            "- Mode snapshot: butuh SKU, last_stock/stok_akhir, last_txn_date/Posting Date, dan cabang/Location Code"
+        df["date_clean"] = dt.date.today()
+
+    records = []
+    for _, row in df.dropna(subset=["date_clean"]).iterrows():
+        records.append(
+            {
+                "cabang": row["cab_clean"],
+                "sku": row["sku_clean"],
+                "last_stock": int(row["stok_clean"]),
+                "last_txn_date": row["date_clean"],
+            }
         )
-
-    if records_latest:
-        upsert_latest_stock_records(records_latest)
-
-
-def load_latest_stock_for_cabang(cabang_filter=None):
-    """Ambil latest_stock per cabang (atau semua)."""
-    ensure_latest_stock_table()
-
-    base_sql = """
-        SELECT
-            cabang,
-            sku,
-            last_txn_date,
-            last_stock
-        FROM latest_stock
-        WHERE 1=1
-    """
-    params = {}
-    if cabang_filter:
-        base_sql += " AND cabang = :cabang"
-        params["cabang"] = cabang_filter
-    base_sql += " ORDER BY cabang, sku"
-
-    with engine.connect() as conn:
-        df = pd.read_sql(
-            text(base_sql),
-            conn,
-            params=params,
-            parse_dates=["last_txn_date"],
-        )
-    return df
-
-
-def save_stock_from_editor(df_editor):
-    """Simpan hasil edit manual dari data_editor ke latest_stock."""
-    if df_editor.empty:
-        return
-
-    df = df_editor.copy()
-    df["cabang"] = df["cabang"].astype(str).str.strip()
-    df["sku"] = df["sku"].astype(str).str.strip()
-
-    df["last_stock"] = pd.to_numeric(df["last_stock"], errors="coerce")
-    df["last_stock"] = df["last_stock"].fillna(0).astype(int)
-    df["last_txn_date"] = pd.to_datetime(df["last_txn_date"]).dt.date
-
-    records = [
-        {
-            "cabang": row["cabang"],
-            "sku": row["sku"],
-            "last_stock": int(row["last_stock"]),
-            "last_txn_date": row["last_txn_date"],
-        }
-        for _, row in df.iterrows()
-        if row["cabang"] and row["sku"] and row["last_txn_date"]
-    ]
 
     upsert_latest_stock_records(records)
 
 
-def load_forecast_per_horizon(cabang_filter=None):
-    """Ambil forecast future agregat per (cabang, sku, horizon) lalu pivot."""
+def load_stok_policy_with_latest_stock(cabang_filter=None):
     sql = """
         SELECT
-            cabang,
-            sku,
-            horizon,
-            SUM(pred_qty) AS forecast_qty
-        FROM forecast_monthly
-        WHERE is_future = 1
-          AND horizon IS NOT NULL
-          AND horizon > 0
+            ls.area,
+            TRIM(UPPER(sp.cabang)) AS cabang,
+            TRIM(UPPER(sp.sku)) AS sku,
+            sp.avg_qty,
+            sp.max_baru,
+            ls.last_txn_date,
+            ls.last_stock
+        FROM stok_policy sp
+        LEFT JOIN latest_stock ls
+          ON TRIM(UPPER(sp.cabang)) COLLATE utf8mb4_unicode_ci = TRIM(UPPER(ls.cabang)) COLLATE utf8mb4_unicode_ci
+         AND TRIM(UPPER(sp.sku))    COLLATE utf8mb4_unicode_ci = TRIM(UPPER(ls.sku))    COLLATE utf8mb4_unicode_ci
+        WHERE 1=1
     """
     params = {}
     if cabang_filter:
-        sql += " AND cabang = :cabang"
-        params["cabang"] = cabang_filter
+        sql += " AND TRIM(UPPER(sp.cabang)) COLLATE utf8mb4_unicode_ci = :cabang COLLATE utf8mb4_unicode_ci "
+        params["cabang"] = _norm_key(cabang_filter)
 
-    sql += " GROUP BY cabang, sku, horizon"
+    sql += " ORDER BY cabang, sku"
 
     with engine.connect() as conn:
-        df_fc = pd.read_sql(text(sql), conn, params=params)
+        df = pd.read_sql(text(sql), conn, params=params, parse_dates=["last_txn_date"])
 
-    if df_fc.empty:
-        return pd.DataFrame(columns=["cabang", "sku"])
-
-    df_pivot = df_fc.pivot(
-        index=["cabang", "sku"],
-        columns="horizon",
-        values="forecast_qty",
-    ).reset_index()
-
-    rename_map = {}
-    for c in df_pivot.columns:
-        if isinstance(c, (int, float)):
-            rename_map[c] = f"forecast_h{int(c)}"
-
-    df_pivot = df_pivot.rename(columns=rename_map)
-    return df_pivot
+    df["last_stock"] = pd.to_numeric(df.get("last_stock"), errors="coerce")
+    df["max_baru"] = pd.to_numeric(df.get("max_baru"), errors="coerce")
+    df["avg_qty"] = pd.to_numeric(df.get("avg_qty"), errors="coerce")
+    return df
 
 
-def get_mape_global_and_per_sku():
-    """
-    Hitung:
-      - MAPE global (semua cabang+SKU di data test)
-      - MAPE per (cabang, sku) di data test
-    """
+def get_future_period_list(active_model_run_id: int, cabang_filter=None):
     sql = """
-        SELECT cabang, sku, qty_actual, pred_qty
+        SELECT DISTINCT periode
         FROM forecast_monthly
-        WHERE is_test = 1
+        WHERE model_run_id = :mid
+          AND is_future = 1
+          AND periode IS NOT NULL
+    """
+    params = {"mid": int(active_model_run_id)}
+    if cabang_filter:
+        sql += " AND TRIM(UPPER(cabang)) COLLATE utf8mb4_unicode_ci = :cabang COLLATE utf8mb4_unicode_ci "
+        params["cabang"] = _norm_key(cabang_filter)
+
+    sql += " ORDER BY periode"
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+
+    periods = []
+    for r in rows:
+        d = _safe_date(r[0])
+        if d:
+            periods.append(d)
+
+    return sorted(list(dict.fromkeys(periods)))
+
+
+def load_forecast_for_month(active_model_run_id: int, target_per: dt.date, cabang_filter=None) -> pd.DataFrame:
+    sql = """
+        SELECT
+            TRIM(UPPER(cabang)) AS cabang,
+            TRIM(UPPER(sku)) AS sku,
+            SUM(pred_qty) AS pred_qty
+        FROM forecast_monthly
+        WHERE model_run_id = :mid
+          AND is_future = 1
+          AND periode IS NOT NULL
+          AND DATE(periode) = :p
+    """
+    params = {"mid": int(active_model_run_id), "p": target_per}
+
+    if cabang_filter:
+        sql += " AND TRIM(UPPER(cabang)) COLLATE utf8mb4_unicode_ci = :cabang COLLATE utf8mb4_unicode_ci "
+        params["cabang"] = _norm_key(cabang_filter)
+
+    sql += " GROUP BY TRIM(UPPER(cabang)), TRIM(UPPER(sku)) "
+
+    with engine.connect() as conn:
+        df = pd.read_sql(text(sql), conn, params=params)
+
+    if df.empty:
+        return pd.DataFrame(columns=["cabang", "sku", "pred_qty"])
+
+    df["pred_qty"] = pd.to_numeric(df["pred_qty"], errors="coerce").fillna(0.0).astype(float)
+    return df
+
+def _try_load_mape_from_model_tables(active_model_run_id: int):
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("SELECT global_test_mape FROM model_run WHERE id = :mid"),
+            {"mid": int(active_model_run_id)},
+        ).fetchone()
+
+    if not row:
+        return None
+
+    mape_global = row[0]
+    if mape_global is None:
+        mape_global = None
+    else:
+        try:
+            mape_global = float(mape_global)
+        except Exception:
+            mape_global = None
+
+    sql = """
+        SELECT
+            TRIM(UPPER(cabang)) AS cabang,
+            TRIM(UPPER(sku)) AS sku,
+            test_mape AS mape_sku
+        FROM model_run_sku
+        WHERE model_run_id = :mid
+    """
+    with engine.connect() as conn:
+        df = pd.read_sql(text(sql), conn, params={"mid": int(active_model_run_id)})
+
+    if df is None:
+        df = pd.DataFrame()
+
+    if mape_global is None:
+        return None
+
+    if df.empty:
+        return float(mape_global), pd.DataFrame(columns=["cabang", "sku", "mape_sku"])
+
+    df["mape_sku"] = pd.to_numeric(df["mape_sku"], errors="coerce")
+    df = df.dropna(subset=["cabang", "sku"])
+    return float(mape_global), df[["cabang", "sku", "mape_sku"]]
+
+
+def _load_mape_from_forecast_monthly_fallback(active_model_run_id: int):
+    sql = """
+        SELECT
+            TRIM(UPPER(cabang)) AS cabang,
+            TRIM(UPPER(sku)) AS sku,
+            qty_actual,
+            pred_qty
+        FROM forecast_monthly
+        WHERE model_run_id = :mid
+          AND is_test = 1
           AND qty_actual IS NOT NULL
           AND pred_qty IS NOT NULL
     """
     with engine.connect() as conn:
-        df = pd.read_sql(text(sql), conn)
+        df = pd.read_sql(text(sql), conn, params={"mid": int(active_model_run_id)})
 
     if df.empty:
-        return None, None
+        return 30.0, pd.DataFrame(columns=["cabang", "sku", "mape_sku"])
 
     df["qty_actual"] = pd.to_numeric(df["qty_actual"], errors="coerce")
     df["pred_qty"] = pd.to_numeric(df["pred_qty"], errors="coerce")
+    df = df.dropna(subset=["qty_actual", "pred_qty"])
+    if df.empty:
+        return 30.0, pd.DataFrame(columns=["cabang", "sku", "mape_sku"])
 
-    y_true = df["qty_actual"].to_numpy(float)
-    y_pred = df["pred_qty"].to_numpy(float)
-    eps = 1e-8
-    denom = np.maximum(np.abs(y_true), eps)
-    mape_global = float(np.mean(np.abs(y_true - y_pred) / denom) * 100.0)
+    y = df["qty_actual"].to_numpy(float)
+    p = df["pred_qty"].to_numpy(float)
+    denom = _eps_denom(y)
+    mape_global = float(np.mean(np.abs(y - p) / denom) * 100.0)
 
-    def _mape_grp(g):
-        y_t = g["qty_actual"].to_numpy(float)
-        y_p = g["pred_qty"].to_numpy(float)
-        denom = np.maximum(np.abs(y_t), eps)
-        return np.mean(np.abs(y_t - y_p) / denom) * 100.0
+    def agg_mape(g):
+        y2 = g["qty_actual"].to_numpy(float)
+        p2 = g["pred_qty"].to_numpy(float)
+        denom2 = _eps_denom(y2)
+        return float(np.mean(np.abs(y2 - p2) / denom2) * 100.0)
 
-    df_grp = (
+    g = (
         df.groupby(["cabang", "sku"], as_index=False)
-        .apply(lambda g: pd.Series({"mape_sku": _mape_grp(g)}))
+        .apply(lambda x: pd.Series({"mape_sku": agg_mape(x)}))
+        .reset_index(drop=True)
     )
 
-    return mape_global, df_grp
+    return mape_global, g
 
 
-def map_mape_to_alpha(mape_value: float) -> float:
-    """Mapping MAPE -> alpha (0-1)."""
-    if mape_value is None or np.isnan(mape_value):
-        return 0.6
+@st.cache_data(ttl=300)
+def load_mape_maps(active_model_run_id: int):
+    try:
+        out = _try_load_mape_from_model_tables(active_model_run_id)
+        if out is not None:
+            return out
+    except Exception:
+        pass
 
-    if mape_value < 20:
-        return 0.9
-    elif mape_value < 30:
-        return 0.7
-    elif mape_value < 40:
-        return 0.6
-    else:
-        return 0.4
+    try:
+        return _load_mape_from_forecast_monthly_fallback(active_model_run_id)
+    except Exception:
+        return 30.0, pd.DataFrame(columns=["cabang", "sku", "mape_sku"])
+
+def render_kpi_box(label, value, info_text, color="#1E88E5"):
+    st.markdown(
+        f"""
+        <div style="
+            background-color: white; padding: 20px; border-radius: 10px; border: 1px solid #E0E0E0;
+            box-shadow: 2px 2px 5px rgba(0,0,0,0.05); min-height: 100px; margin-bottom: 20px;
+        ">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <div style="color: #757575; font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px;">
+                    {label}
+                </div>
+                <div title="{info_text}" style="cursor: help; color: #1E88E5; font-size: 14px; font-weight: bold;">
+                    ⓘ
+                </div>
+            </div>
+            <div style="color: {color}; font-size: 26px; font-weight: bold; margin-top: 8px;">
+                {value}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
-# UI Streamlit
-st.set_page_config(
-    page_title="Safety Stock & Policy",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+def run_upsert_policy():
+    upsert_stok_policy_from_sales_monthly(None)
 
+st.set_page_config(page_title="Logistik - Safety Stock", layout="wide")
 init_page_loader_css()
 
-with page_loading("Menyiapkan halaman Manajemen Stok & Policy..."):
-    require_login()
-    inject_global_theme()
-    render_sidebar_user_and_logout()
-    init_loading_css()
+require_login()
+inject_global_theme()
+render_sidebar_user_and_logout()
+init_loading_css()
 
-if "user" not in st.session_state:
-    st.error("Silakan login dulu.")
+active_model_run_id = get_active_model_run_id()
+
+st.title("Manajemen Stok dan Rekomendasi Order")
+
+if active_model_run_id is None:
+    st.error("Belum ada model aktif. Minta Admin aktifkan model dulu di Riwayat Model.")
     st.stop()
 
-user = st.session_state["user"]
-role = str(user.get("role", "user")).lower()
+summary = get_db_summary(active_model_run_id)
 
-st.markdown("## Manajemen Stok & Rekomendasi Order")
-st.markdown(
-    "Halaman ini membantu bagian logistik melihat stok sekarang dan saran order per bulan."
-)
+tab_setup, tab_order = st.tabs(["SETUP DATA", "REKOMENDASI ORDER"])
 
-tab_analisa, tab_admin = st.tabs(["Analisa & Rekomendasi", "Manajemen Data (Admin)"])
+with engine.connect() as conn:
+    try:
+        res = conn.execute(text("SELECT DISTINCT cabang FROM stok_policy ORDER BY cabang")).fetchall()
+        cabs_list = [r[0] for r in res] if res else []
+    except Exception:
+        cabs_list = []
 
-
-# Tab 1: Analisa & rekomendasi
-with tab_analisa:
+with tab_setup:
     with st.container(border=True):
-        st.markdown("**Filter Data**")
+        c1, c2 = st.columns([4, 1])
+        c1.markdown(
+            "### Update Target Kebijakan Stok\n"
+            "Hitung ulang batas aman stok berdasarkan histori penjualan."
+        )
+        with c2:
+            st.write("##")
+            if st.button("HITUNG TARGET", use_container_width=True):
+                try:
+                    with st.spinner("Sedang menghitung target stok..."):
+                        run_upsert_policy()
+                    st.toast("Target stok berhasil dihitung ulang.", icon="✅")
+                    st.rerun()
+                except Exception:
+                    st.error("Gagal menghitung target. Coba ulang.")
+
+    st.write("")
+
+    with st.container(border=True):
+        st.markdown("### Unggah Data Stok Akhir")
+        up_file = st.file_uploader("Upload file gudang", type=["xlsx", "xls", "csv"], label_visibility="collapsed")
+        if up_file and st.button("PROSES UNGGAH FILE", use_container_width=True):
+            try:
+                with st.spinner("Memproses file..."):
+                    if up_file.name.lower().endswith(".csv"):
+                        df_up = pd.read_csv(up_file)
+                    else:
+                        df_up = pd.read_excel(up_file)
+
+                    save_uploaded_stock(df_up)
+
+                st.toast("Data stok berhasil diperbarui.", icon="✅")
+                st.rerun()
+            except Exception:
+                st.error("File tidak bisa diproses. Cek kolom: cabang/location, sku, stok, dan tanggal.")
+
+    st.write("")
+
+    with st.container(border=True):
+        st.markdown("### Perbarui Stok Manual")
+        sel_c_edit = st.selectbox("Pilih Cabang", ["Pilih Cabang"] + cabs_list, label_visibility="collapsed")
+        if sel_c_edit != "Pilih Cabang":
+            df_m = load_stok_policy_with_latest_stock(sel_c_edit)
+
+            if df_m.empty:
+                st.info("Data policy kosong untuk cabang ini. Jalankan 'Hitung Target' dulu.")
+            else:
+                editable = df_m[["cabang", "sku", "last_stock", "last_txn_date"]].copy()
+                editable["last_stock"] = pd.to_numeric(editable["last_stock"], errors="coerce").fillna(0).astype(int)
+                editable["last_stock"] = np.maximum(editable["last_stock"], 0)  # safety: jangan simpan negatif
+
+                edited = st.data_editor(
+                    editable,
+                    column_config={
+                        "last_stock": st.column_config.NumberColumn("Stok Akhir", format="%d"),
+                        "last_txn_date": st.column_config.DateColumn("Tanggal Stok"),
+                    },
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                if st.button("SIMPAN MANUAL", use_container_width=True):
+                    try:
+                        with st.spinner("Menyimpan stok..."):
+                            upsert_latest_stock_records(edited.to_dict("records"))
+                        st.toast("Perubahan stok tersimpan.", icon="✅")
+                        st.rerun()
+                    except Exception:
+                        st.error("Gagal simpan stok. Coba ulang.")
+
+with tab_order:
+    if summary["policy"] == 0:
+        st.warning("Jalankan 'Hitung Target' terlebih dahulu di tab SETUP DATA.")
+        st.stop()
+
+    with st.container(border=True):
         f1, f2, f3, f4 = st.columns(4)
 
-        with engine.begin() as conn:
-            rows_cabang = conn.execute(
-                text("SELECT DISTINCT cabang FROM stok_policy ORDER BY cabang")
-            ).fetchall()
-        cabang_list = [r[0] for r in rows_cabang] if rows_cabang else []
-
         with f1:
-            selected_cabang = st.selectbox(
-                "Pilih Cabang",
-                ["ALL"] + cabang_list,
-                index=0,
-                help="Pilih cabang tertentu atau ALL untuk semua cabang.",
-            )
+            sel_cab = st.selectbox("Cabang", ["SEMUA"] + cabs_list)
 
-        filter_val = selected_cabang if selected_cabang != "ALL" else None
-
-        df_fc_check = load_forecast_per_horizon(filter_val)
-        fc_cols_check = [
-            c for c in df_fc_check.columns if c.startswith("forecast_h")
-        ]
-        horizons = (
-            sorted(int(c.replace("forecast_h", "")) for c in fc_cols_check)
-            if fc_cols_check
-            else [1]
-        )
+        cab_filter = None if sel_cab == "SEMUA" else sel_cab
 
         with f2:
-            selected_horizon = st.selectbox(
-                "Periode Order",
-                options=horizons,
-                index=0,
-                format_func=lambda x: f"Bulan ke-{x}",
-                help="Bulan ke-1 = bulan depan, bulan ke-2 = dua bulan lagi.",
-            )
+            p_list = get_future_period_list(active_model_run_id, cab_filter)
+            if not p_list:
+                st.selectbox("Target Bulan", ["Belum ada forecast future"], disabled=True)
+                sel_per = None
+            else:
+                sel_per = st.selectbox("Target Bulan", p_list, format_func=_fmt_bulan)
 
         with f3:
-            status_filter = st.selectbox(
-                "Status Stok",
-                ["Semua", "Risiko Kekurangan", "Potensi Kelebihan", "Aman"],
-                index=0,
-                help="Pilih status stok yang ingin dilihat.",
-            )
+            sel_status = st.selectbox("Kondisi", ["Semua", "Risiko Kekurangan", "Potensi Kelebihan", "Aman"])
 
         with f4:
-            with engine.begin() as conn:
-                if filter_val:
-                    rows_sku = conn.execute(
-                        text(
-                            "SELECT DISTINCT sku FROM stok_policy "
-                            "WHERE cabang = :cabang ORDER BY sku"
-                        ),
-                        {"cabang": filter_val},
-                    ).fetchall()
-                else:
-                    rows_sku = conn.execute(
-                        text("SELECT DISTINCT sku FROM stok_policy ORDER BY sku")
-                    ).fetchall()
+            sku_opts = ["SEMUA SKU"]
+            if sel_per:
+                df_fc_month = load_forecast_for_month(active_model_run_id, sel_per, cab_filter)
+                if not df_fc_month.empty:
+                    df_fc_month["pred_qty"] = pd.to_numeric(df_fc_month["pred_qty"], errors="coerce").fillna(0.0)
+                    df_fc_month = df_fc_month[df_fc_month["pred_qty"] > 0].copy()
+                    if not df_fc_month.empty:
+                        sku_opts += sorted(df_fc_month["sku"].dropna().astype(str).unique().tolist())
 
-            sku_options = ["Semua SKU"] + [r[0] for r in rows_sku]
-            selected_sku = st.selectbox(
-                "Pilih SKU",
-                options=sku_options,
-                index=0,
-                help="Ketik untuk cari SKU tertentu, atau pilih 'Semua SKU'.",
-            )
+            sel_sku = st.selectbox("Pilih SKU", sku_opts)
 
-        mape_global, df_mape_sku = get_mape_global_and_per_sku()
+    if not sel_per:
+        st.stop()
 
-    with page_loading("Mengambil dan memproses data stok & forecast..."):
+    show_detail = st.checkbox("Tampilkan detail perhitungan", value=False)
 
-        df_raw = load_stok_policy_with_latest_stock(filter_val)
-        if df_raw.empty:
-            st.warning(
-                "Data stok_policy / latest_stock kosong untuk cabang ini. "
-                "Silakan jalankan Recompute Policy dan upload stok terlebih dahulu."
-            )
-            st.stop()
+    try:
+        with st.spinner("Menyiapkan rekomendasi order..."):
+            df_p = load_stok_policy_with_latest_stock(cab_filter)
+            if df_p.empty:
+                st.info("Data policy kosong. Jalankan Hitung Target dulu.")
+                st.stop()
 
-        df_fc = load_forecast_per_horizon(filter_val)
-        if not df_fc.empty:
-            df = df_raw.merge(df_fc, how="left", on=["cabang", "sku"])
-        else:
-            df = df_raw.copy()
+            df_fc = load_forecast_for_month(active_model_run_id, sel_per, cab_filter)
+            if df_fc.empty:
+                st.info("Tidak ada forecast untuk bulan yang dipilih.")
+                st.stop()
 
-        forecast_cols = [c for c in df.columns if c.startswith("forecast_h")]
-        if forecast_cols:
-            df[forecast_cols] = df[forecast_cols].apply(
-                lambda s: pd.to_numeric(s, errors="coerce")
-            )
-            df["forecast_sum"] = df[forecast_cols].fillna(0).sum(axis=1)
-            df = df[df["forecast_sum"] > 0].drop(columns=["forecast_sum"])
+            df = df_p.merge(df_fc, on=["cabang", "sku"], how="inner")
+            df["pred_qty"] = pd.to_numeric(df["pred_qty"], errors="coerce").fillna(0.0)
+            df = df[df["pred_qty"] > 0].copy()
+            if df.empty:
+                st.info("Tidak ada SKU dengan forecast positif di bulan ini.")
+                st.stop()
 
-        if df.empty:
-            st.info(
-                "Tidak ada SKU yang punya forecast future untuk cabang/filter ini. "
-                "Silakan jalankan generate forecast di halaman Dashboard Perencanaan Stok."
-            )
-            st.stop()
-
-        if df_mape_sku is not None and not df_mape_sku.empty:
-            df = df.merge(df_mape_sku, how="left", on=["cabang", "sku"])
-            if mape_global is not None:
-                df["mape_used"] = df["mape_sku"].fillna(mape_global)
+            mape_global, df_mape = load_mape_maps(active_model_run_id)
+            if df_mape is not None and not df_mape.empty:
+                df = df.merge(df_mape, on=["cabang", "sku"], how="left")
+                df["mape_used"] = df["mape_sku"].fillna(float(mape_global))
             else:
-                df["mape_used"] = df["mape_sku"]
-        else:
-            df["mape_sku"] = np.nan
-            df["mape_used"] = mape_global if mape_global is not None else np.nan
+                df["mape_used"] = float(mape_global)
 
-        df["alpha"] = df["mape_used"].apply(map_mape_to_alpha)
+            df["alpha"] = df["mape_used"].apply(map_mape_to_alpha)
 
-        for col in ["avg_qty", "max_baru", "last_stock"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+            df["max_baru"] = pd.to_numeric(df.get("max_baru"), errors="coerce").fillna(0.0)
+            df["last_stock"] = pd.to_numeric(df.get("last_stock"), errors="coerce")
 
-        df["safety_stock"] = (0.8 * df["max_baru"]).round()
+            df["safety_stock"] = (0.8 * df["max_baru"]).fillna(0.0).round().astype(int)
+            df["stock_minimum"] = df["safety_stock"].astype(int)
 
-        col_fc_target = f"forecast_h{selected_horizon}"
-        col_rec_target = "rec_order_view"
-
-        if col_fc_target in df.columns:
-            df[col_fc_target] = pd.to_numeric(df[col_fc_target], errors="coerce").fillna(0)
-
+            # Target stok = max(minimum, alpha*forecast)
             df["target_stock"] = np.maximum(
-                df["safety_stock"],
-                df["alpha"] * df[col_fc_target],
+                df["stock_minimum"].to_numpy(int),
+                np.round(df["alpha"].to_numpy(float) * df["pred_qty"].to_numpy(float)).astype(int),
             )
 
-            df[col_rec_target] = np.where(
-                df["last_stock"].notna(),
-                np.maximum(df["target_stock"] - df["last_stock"], 0),
-                df["target_stock"],
-            )
-            df[col_rec_target] = df[col_rec_target].round().astype(int)
-        else:
-            df[col_fc_target] = 0
-            df["target_stock"] = df["safety_stock"]
-            df[col_rec_target] = np.where(
+            # Saran order = target - stok sekarang
+            df["saran_order"] = np.where(
                 df["last_stock"].notna(),
                 np.maximum(df["target_stock"] - df["last_stock"], 0),
                 df["target_stock"],
             ).round().astype(int)
 
-        cond_short = df["last_stock"].notna() & (df["last_stock"] < df["safety_stock"])
-        cond_excess = df["last_stock"].notna() & (df["last_stock"] > df["target_stock"])
-
-        df["Status"] = "Aman"
-        df.loc[cond_short, "Status"] = "Risiko Kekurangan"
-        df.loc[cond_excess, "Status"] = "Potensi Kelebihan"
-        df.loc[df["last_stock"].isna(), "Status"] = "Data Stok Kosong"
-
-        df_view = df.copy()
-
-        if status_filter != "Semua":
-            df_view = df_view[df_view["Status"] == status_filter]
-
-        if selected_sku != "Semua SKU":
-            df_view = df_view[df_view["sku"] == selected_sku]
-
-    if df_view.empty:
-        st.info("Tidak ada data untuk kombinasi filter ini.")
-    else:
-        total_order_qty = float(df_view[col_rec_target].sum())
-        n_short = int((df_view["Status"] == "Risiko Kekurangan").sum())
-        n_excess = int((df_view["Status"] == "Potensi Kelebihan").sum())
-
-        if n_short > 0 and n_excess > 0:
-            st.warning(
-                f"Terdapat {n_short} SKU dengan risiko kekurangan stok dan "
-                f"{n_excess} SKU dengan potensi kelebihan stok pada filter ini."
-            )
-        elif n_short > 0:
-            st.error(
-                f"Terdapat {n_short} SKU dengan risiko kekurangan stok pada filter ini."
-            )
-        elif n_excess > 0:
-            st.warning(
-                f"Terdapat {n_excess} SKU dengan potensi kelebihan stok pada filter ini."
-            )
-        else:
-            st.info(
-                "Tidak ada SKU dengan risiko kekurangan maupun potensi kelebihan stok pada filter ini."
+            # Gap vs minimum = stok - minimum (negatif berarti kurang dari minimum)
+            df["gap_vs_minimum"] = np.where(
+                df["last_stock"].notna(),
+                (df["last_stock"] - df["stock_minimum"]).astype(float),
+                np.nan,
             )
 
-        st.markdown(f"#### Ringkasan Saran Order · Bulan ke-{selected_horizon}")
+            def get_status(row):
+                stock = row["last_stock"]
+                if pd.isna(stock):
+                    return "DATA STOK KOSONG"
+                if stock <= 0:
+                    return "HABIS"
+                if stock < row["stock_minimum"]:
+                    return "KRITIS"
+                if stock > (row["target_stock"] * 1.5):
+                    return "OVERSTOCK"
+                return "AMAN"
 
-        k1, k2, k3 = st.columns(3)
-        with k1:
-            st.metric(
-                label="Total Saran Order",
-                value=f"{total_order_qty:,.0f}",
-                help=f"Total qty yang disarankan untuk dipesan di bulan ke-{selected_horizon}.",
-            )
-        with k2:
-            st.metric(
-                label="SKU Risiko Kekurangan",
-                value=f"{n_short}",
-                help="Jumlah SKU dengan stok di bawah batas aman.",
-            )
-        with k3:
-            st.metric(
-                label="SKU Potensi Kelebihan",
-                value=f"{n_excess}",
-                help="Jumlah SKU dengan stok di atas stok yang disarankan.",
-            )
+            df["Status"] = df.apply(get_status, axis=1)
 
-        st.divider()
+            if sel_status != "Semua":
+                status_map = {
+                    "Risiko Kekurangan": ["HABIS", "KRITIS"],
+                    "Potensi Kelebihan": ["OVERSTOCK"],
+                    "Aman": ["AMAN"],
+                }
+                df = df[df["Status"].isin(status_map.get(sel_status, []))]
 
-        st.markdown("#### Detail Stok & Saran Order per SKU")
+            if sel_sku != "SEMUA SKU":
+                df = df[df["sku"] == sel_sku]
 
+            if df.empty:
+                st.info("Tidak ada data sesuai filter.")
+                st.stop()
+
+    except Exception:
+        st.error("Gagal memproses rekomendasi. Coba refresh halaman.")
+        st.stop()
+
+    st.write("")
+    r1, r2, r3 = st.columns(3)
+    with r1:
+        render_kpi_box("Rencana Order", f"{int(df['saran_order'].sum()):,} Unit", "Total barang disarankan beli.")
+    with r2:
+        render_kpi_box(
+            "Butuh Segera",
+            f"{len(df[df['Status'].isin(['HABIS', 'KRITIS'])]):,} SKU",
+            "Barang stok kritis atau habis.",
+            color="#D32F2F",
+        )
+    with r3:
+        render_kpi_box(
+            "SKU Aktif",
+            f"{len(df):,} SKU",
+            "SKU yang punya forecast > 0 di bulan terpilih.",
+            color="#388E3C",
+        )
+
+    def _style_text(val):
+        if val == "HABIS":
+            return "color: #8b0000; font-weight: bold;"
+        if val == "KRITIS":
+            return "color: #ff4b4b; font-weight: bold;"
+        if val == "OVERSTOCK":
+            return "color: #ffa500; font-weight: bold;"
+        if val == "AMAN":
+            return "color: #28a745; font-weight: bold;"
+        if val == "DATA STOK KOSONG":
+            return "color: #6d6d6d; font-weight: bold;"
+        return ""
+
+    df_show = df.copy()
+    df_show["Forecast"] = df_show["pred_qty"]
+
+    df_show = df_show.rename(
+        columns={
+            "cabang": "Cabang",
+            "sku": "SKU",
+            "Status": "Kondisi",
+            "last_stock": "Stok",
+            "stock_minimum": "Stock Minimum",
+            "gap_vs_minimum": "Gap vs Minimum",
+            "mape_used": "MAPE%",
+            "alpha": "Alpha",
+            "saran_order": "Order",
+        }
+    )
+
+    show_cols = ["Cabang", "SKU", "Kondisi", "Stok", "Stock Minimum", "Order"]
+
+    if show_detail:
         show_cols = [
-            "area",
-            "cabang",
-            "sku",
-            "Status",
-            "last_stock",
-            "safety_stock",
-            col_fc_target,
-            col_rec_target,
+            "Cabang",
+            "SKU",
+            "Kondisi",
+            "Stok",
+            "Stock Minimum",
+            "Gap vs Minimum",
+            "Forecast",
+            "MAPE%",
+            "Alpha",
+            "Order",
         ]
-        existing_cols = [c for c in show_cols if c in df_view.columns]
-        df_display = df_view[existing_cols].copy()
 
-        df_display = df_display.rename(
-            columns={
-                "area": "Area",
-                "cabang": "Cabang",
-                "sku": "SKU",
-                "Status": "Status Stok",
-                "last_stock": "Stok Saat Ini",
-                "safety_stock": "Safety Stock",
-                col_fc_target: f"Forecast Bulan ke-{selected_horizon}",
-                col_rec_target: "Saran Order",
-            }
-        )
+    show_cols = [c for c in show_cols if c in df_show.columns]
 
-        st.dataframe(
-            df_display,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Area": st.column_config.TextColumn(
-                    "Area",
-                    help="Kode area cabang.",
-                ),
-                "Cabang": st.column_config.TextColumn(
-                    "Cabang",
-                    help="Kode cabang.",
-                ),
-                "SKU": st.column_config.TextColumn(
-                    "SKU",
-                    help="Kode barang (SKU).",
-                ),
-                "Status Stok": st.column_config.TextColumn(
-                    "Status Stok",
-                    help="Posisi stok: aman, kurang, atau kelebihan.",
-                ),
-                "Stok Saat Ini": st.column_config.NumberColumn(
-                    "Stok Saat Ini",
-                    format="%.0f",
-                    help="Qty stok terakhir yang tercatat.",
-                ),
-                "Safety Stock": st.column_config.NumberColumn(
-                    "Safety Stock",
-                    format="%.0f",
-                    help="Batas minimal stok yang sebaiknya ada di gudang.",
-                ),
-                f"Forecast Bulan ke-{selected_horizon}": st.column_config.NumberColumn(
-                    f"Forecast Bulan ke-{selected_horizon}",
-                    format="%.0f",
-                    help=f"Perkiraan kebutuhan barang di bulan ke-{selected_horizon}.",
-                ),
-                "Saran Order": st.column_config.NumberColumn(
-                    "Saran Order",
-                    format="%.0f",
-                    help="Qty yang disarankan untuk dipesan.",
-                ),
-            },
-        )
+    col_cfg = {
+        "Stok": st.column_config.NumberColumn(format="%d"),
+        "Stock Minimum": st.column_config.NumberColumn(format="%d"),
+        "Order": st.column_config.NumberColumn(format="%d"),
+    }
+    if "Forecast" in show_cols:
+        col_cfg["Forecast"] = st.column_config.NumberColumn(format="%d")
+    if "MAPE%" in show_cols:
+        col_cfg["MAPE%"] = st.column_config.NumberColumn(format="%.1f")
+    if "Alpha" in show_cols:
+        col_cfg["Alpha"] = st.column_config.NumberColumn(format="%.2f")
+    if "Gap vs Minimum" in show_cols:
+        col_cfg["Gap vs Minimum"] = st.column_config.NumberColumn(format="%.0f")
 
+    st.dataframe(
+        df_show[show_cols].style.applymap(_style_text, subset=["Kondisi"]),
+        column_config=col_cfg,
+        use_container_width=True,
+        hide_index=True,
+    )
 
-# Tab 2: Manajemen data (admin)
-with tab_admin:
-    c1, c2 = st.columns(2)
-
-    # Upload stok
-    with c1:
-        with st.container(border=True):
-            st.markdown("**1. Upload Data Stok**")
-            st.caption(
-                "File bisa CSV / Excel.\n"
-                "- Mode history: SKU, Cabang/Location, tanggal (Posting Date / Periode), stok_akhir/Stock\n"
-                "- Mode snapshot: SKU, Cabang/Location, tanggal terakhir, last_stock/stok_akhir"
-            )
-
-            uploaded_file = st.file_uploader(
-                "Pilih file stok",
-                type=["xlsx", "xls", "csv"],
-                key="upload_stok",
-            )
-
-            if uploaded_file is not None:
-                if st.button("Proses Upload", type="primary", key="btn_upload_stok"):
-                    try:
-                        fname = uploaded_file.name
-                        lower = fname.lower()
-                        if lower.endswith(".csv"):
-                            df_up = pd.read_csv(uploaded_file)
-                        else:
-                            df_up = pd.read_excel(uploaded_file)
-
-                        save_uploaded_stock(df_up, filename=fname)
-                        st.success("Data stok berhasil diupload dan disimpan.")
-                    except Exception as e:
-                        st.error(f"Gagal memproses file: {e}")
-
-    # Recompute policy
-    with c2:
-        with st.container(border=True):
-            st.markdown("**2. Hitung Ulang Policy (MAX & Safety Stock)**")
-            st.caption(
-                "Jalankan jika ada data penjualan bulanan baru, "
-                "supaya nilai MAX dan Safety Stock ikut diperbarui."
-            )
-
-            def _do_recompute():
-                build_stok_policy_from_sales_monthly(cabang=None)
-                recompute_stok_policy(cabang=None)
-
-            action_with_loader(
-                key="btn_recompute_policy",
-                button_label="Jalankan Recompute Policy",
-                message="Sedang menghitung ulang policy di database...",
-                fn=_do_recompute,
-            )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Edit stok manual
-    with st.container(border=True):
-        st.markdown("**3. Edit Stok Manual (latest_stock)**")
-
-        with engine.begin() as conn:
-            rows = conn.execute(
-                text("SELECT DISTINCT cabang FROM stok_policy ORDER BY cabang")
-            ).fetchall()
-        cab_opts = [r[0] for r in rows] if rows else []
-
-        cab_edit = st.selectbox(
-            "Pilih cabang untuk edit stok",
-            ["ALL"] + cab_opts,
-            key="cab_edit_manual",
-            help="Pilih cabang yang stoknya mau diubah manual.",
-        )
-        cab_filter = cab_edit if cab_edit != "ALL" else None
-
-        df_edit = load_latest_stock_for_cabang(cab_filter)
-        if df_edit.empty:
-            st.info("Belum ada data latest stok untuk cabang ini.")
-            df_edit = pd.DataFrame(
-                columns=["cabang", "sku", "last_txn_date", "last_stock"]
-            )
-
-        edited = st.data_editor(
-            df_edit,
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "cabang": st.column_config.TextColumn(
-                    "Cabang",
-                    required=True,
-                    help="Kode cabang.",
-                ),
-                "sku": st.column_config.TextColumn(
-                    "SKU",
-                    required=True,
-                    help="Kode barang.",
-                ),
-                "last_txn_date": st.column_config.DateColumn(
-                    "Tanggal Terakhir",
-                    help="Tanggal stok terakhir tercatat.",
-                ),
-                "last_stock": st.column_config.NumberColumn(
-                    "Stok Terakhir",
-                    step=1,
-                    help="Qty stok pada tanggal terakhir.",
-                ),
-            },
-            key="editor_latest_stock",
-        )
-
-        if st.button("Simpan Perubahan Stok Manual", key="btn_save_manual"):
-            try:
-                save_stock_from_editor(edited)
-                st.success("Perubahan stok manual berhasil disimpan.")
-                try:
-                    st.toast("Database updated.", icon="✅")
-                except Exception:
-                    pass
-            except Exception as e:
-                st.error(f"Gagal menyimpan stok manual: {e}")
+    st.download_button(
+        "Download Laporan Order (CSV)",
+        df_show[show_cols].to_csv(index=False).encode("utf-8"),
+        f"order_{sel_per}.csv",
+        "text/csv",
+        use_container_width=True,
+    )

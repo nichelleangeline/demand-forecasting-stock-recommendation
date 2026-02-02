@@ -1,16 +1,11 @@
-# app/services/forecast_engine_future.py
-
 from __future__ import annotations
-
 from pathlib import Path
 from typing import Dict, List, Optional
-
 import json
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
 from sqlalchemy import text
-
 from app.features.hierarchy_features import add_hierarchy_features
 from app.features.stabilizer_features import add_stabilizer_features
 from app.features.outlier_handler import winsorize_outliers
@@ -20,19 +15,12 @@ from app.services.history_service import load_history
 from app.services.model_service import get_active_model_run
 from app.inference.predict_cluster_pipeline import load_cluster_models
 
-# ============================================
-# HELPER: ambil cluster dari panel training
-# ============================================
 
 def _get_cluster_for_sku_from_panel(
     run: dict,
     cabang: str,
     sku: str,
 ) -> int:
-    """
-    Ambil cluster SKU dari panel training (panel_with_predictions.csv)
-    supaya konsisten dengan training. Tidak pakai clustering ulang.
-    """
 
     params_raw = run.get("params_json")
     if isinstance(params_raw, str):
@@ -82,19 +70,7 @@ def _get_cluster_for_sku_from_panel(
     return int(cid)
 
 
-# ============================================
-# HELPER: FE seperti training
-# ============================================
 def _apply_full_FE(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    FE harus sama seperti Tab 3 training.
-
-    Di sini df sudah punya:
-      - area, cabang, sku, periode, qty, event_flag, holiday_count, rainfall
-      - is_train (untuk stabilizer_features)
-      - cluster (supaya ikut dipakai sebagai fitur kalau ada)
-    """
-
     df = df.copy()
 
     # 0) pastikan urut
@@ -160,11 +136,6 @@ def _infer_feature_cols(df: pd.DataFrame) -> List[str]:
     ]
     return [c for c in df.columns if c not in drop_cols]
 
-
-# ============================================
-# FORECAST 1 SKU (multi-step)
-# ============================================
-
 def forecast_future_by_sku(
     engine,
     cabang: str,
@@ -173,12 +144,6 @@ def forecast_future_by_sku(
     feature_cols: Optional[List[str]] = None,
     **kwargs,
 ) -> pd.DataFrame:
-    """
-    Forecast ke depan untuk 1 (cabang, sku) selama 'horizon' bulan.
-
-    kwargs dipakai untuk kompatibilitas dengan pemanggilan lama
-    (misal: models=..., run_dir=..., dsb) dan diabaikan di sini.
-    """
 
     # 1. ambil run aktif + lokasi model
     run = get_active_model_run()
@@ -281,7 +246,7 @@ def forecast_future_by_sku(
             ]
         )
 
-        # gabung ke df_loop, FE + lags ulang (biar lag pakai pred step sebelumnya)
+        # gabung ke df_loop, FE + lags ulang 
         tmp = pd.concat([df_loop, f], ignore_index=True)
         tmp = tmp.sort_values("periode").reset_index(drop=True)
 
@@ -297,7 +262,6 @@ def forecast_future_by_sku(
         f2["pred_qty"] = float(pred_qty)
         preds.append(f2)
 
-        # update df_loop: isi qty untuk next_period pakai pred agar lag next step pakai angka ini
         tmp.loc[tmp["periode"] == next_period, "qty"] = pred_qty
         df_loop = tmp.copy()
 
@@ -305,15 +269,8 @@ def forecast_future_by_sku(
     return df_future
 
 
-# ============================================
-# SIMPAN KE DB (opsional)
-# ============================================
 
 def save_future_to_db(engine, df_future: pd.DataFrame, model_run_id: int):
-    """
-    Simpan hasil forecast future ke tabel forecast_future.
-    """
-
     sql = text(
         """
         INSERT INTO forecast_future (

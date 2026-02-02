@@ -1,20 +1,11 @@
-# app/services/sku_profile_service.py
-
 import pandas as pd
 from sqlalchemy import text
-
 from app.db import engine
 from app.profiling.sku_profiler import build_sku_profile
 from app.profiling.clustering import run_sku_clustering
 
 
 def load_panel_from_db() -> pd.DataFrame:
-    """
-    Build panel sederhana dari sales_monthly.
-    Minimal kolom:
-        cabang, sku, periode, qty
-    Area tidak terlalu penting untuk profiling, tapi kita ambil juga.
-    """
 
     sql = """
         SELECT
@@ -39,10 +30,6 @@ def load_panel_from_db() -> pd.DataFrame:
 
 
 def save_sku_profile_to_db(profile_df: pd.DataFrame):
-    """
-    Upsert ke tabel sku_profile pakai UNIQUE (cabang, sku).
-    """
-
     if profile_df.empty:
         return 0
 
@@ -105,15 +92,6 @@ def save_sku_profile_to_db(profile_df: pd.DataFrame):
 
 
 def build_and_store_sku_profile(n_clusters: int = 4) -> int:
-    """
-    Main function:
-    1) Load panel dari DB
-    2) Build profile per (cabang, sku)
-    3) Clustering
-    4) Upsert ke sku_profile
-    Return: jumlah baris yang di-upsert
-    """
-
     panel = load_panel_from_db()
     if panel.empty:
         raise RuntimeError("Tidak ada data di sales_monthly, isi dulu datanya.")

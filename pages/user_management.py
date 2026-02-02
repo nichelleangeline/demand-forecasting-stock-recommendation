@@ -1,46 +1,35 @@
-# pages/admin_user_management.py
-
 import streamlit as st
 import pandas as pd
-
 from app.ui.theme import inject_global_theme, render_sidebar_user_and_logout
 from app.loading_utils import init_loading_css, action_with_loader
 from app.services.page_loader import init_page_loader_css, page_loading
-
 from app.services.user_management_service import (
     get_all_users,
     update_user_basic,
     delete_user_account,
 )
-
 from app.services.auth_service import (
     get_pending_reset_codes,
     cleanup_reset_codes,
     create_user,
     admin_approve_reset,
 )
-
 from app.services.auth_guard import require_login
 
 
-# Konfigurasi halaman
 st.set_page_config(
     page_title="Manajemen Pengguna",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
-
-# Loader CSS khusus page loader
 init_page_loader_css()
 
-# Setup awal dibungkus loader biar transisi halus
 with page_loading("Menyiapkan halaman Manajemen Pengguna..."):
     require_login()
     inject_global_theme()
     render_sidebar_user_and_logout()
     init_loading_css()
 
-# CSS khusus komponen (tidak menyentuh .stApp / sidebar)
 st.markdown(
     """
     <style>
@@ -312,7 +301,6 @@ tab_list, tab_create, tab_reset = st.tabs(
     ["Daftar Akun", "Buat Akun Baru", "Manajemen Reset Password"]
 )
 
-# TAB 1: daftar & edit akun
 with tab_list:
     f_col, s_col = st.columns([2, 2])
     with f_col:
@@ -525,7 +513,6 @@ with tab_list:
                         "Hapus permanen hanya tersedia untuk akun yang sudah dinonaktifkan."
                     )
 
-# TAB 2: buat akun baru
 with tab_create:
     st.subheader("Buat Akun Baru")
 
@@ -583,7 +570,6 @@ with tab_create:
                 except Exception as e:
                     st.error(str(e))
 
-# TAB 3: manajemen reset password
 with tab_reset:
     st.subheader("Manajemen Reset Password")
 

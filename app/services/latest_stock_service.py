@@ -1,18 +1,9 @@
-# app/services/latest_stock_service.py
-
 import pandas as pd
 from sqlalchemy import text
 from app.db import engine
 
 
 def build_latest_stock_from_transactions():
-    """
-    Ambil data transaksi dari sales_raw,
-    lalu hitung stok terakhir per cabang+sku
-    berdasarkan baris transaksi terakhir.
-    Hasilnya di-upsert ke tabel latest_stock.
-    """
-
     # 1. Load data transaksi dari DB
     sql = """
         SELECT

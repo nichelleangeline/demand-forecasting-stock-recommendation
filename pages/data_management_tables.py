@@ -1,5 +1,3 @@
-# pages/data_management_tables.py
-
 import streamlit as st
 import pandas as pd
 from sqlalchemy import text
@@ -16,7 +14,7 @@ from app.services.sales_upload_service import (
     save_latest_stock_to_db,
 )
 
-# Konfigurasi halaman
+
 st.set_page_config(
     page_title="Data Management",
     layout="wide",
@@ -41,8 +39,6 @@ if "user" not in st.session_state:
 user = st.session_state["user"]
 user_id = user.get("user_id")
 role = user.get("role", "user")
-
-# Kalau mau batasi per area, isi list-nya
 allowed_areas = None  # Admin akses semua area
 
 # Styling input dan tombol di konten utama

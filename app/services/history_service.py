@@ -1,17 +1,9 @@
-# app/services/history_service.py
-
 from typing import Dict
 import pandas as pd
 from sqlalchemy import text
 
 
 def load_history(engine, cabang: str, sku: str) -> pd.DataFrame:
-    """
-    Load riwayat penjualan + exog untuk satu cabang+SKU
-    dari sales_monthly + external_data.
-    Dipakai di forecast_engine_future / orchestrator.
-    """
-
     sql = text(
         """
         SELECT

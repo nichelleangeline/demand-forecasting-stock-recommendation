@@ -1,3 +1,1 @@
-﻿# Skripsi-Nichelle
-
-Sistem Forecasting dan Rekomendasi Stock 
+﻿Sistem Forecasting dan Rekomendasi Stock 

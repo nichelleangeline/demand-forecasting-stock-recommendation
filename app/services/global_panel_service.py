@@ -1,14 +1,9 @@
-# app/services/global_panel_service.py
-
 from datetime import date
 from typing import List, Optional
-
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
-
 from app.db import engine
-
 from app.features.hierarchy_features import add_hierarchy_features
 from app.features.stabilizer_features import add_stabilizer_features
 from app.features.outlier_handler import winsorize_outliers
@@ -16,22 +11,11 @@ from app.profiling.sku_profiler import build_sku_profile
 from app.profiling.clustering import run_sku_clustering
 
 
-# =========================================
-# 1. Ambil data bulanan dari DB
-# =========================================
-
 def fetch_monthly_panel_from_db(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     cabang_list: Optional[List[str]] = None,
 ) -> pd.DataFrame:
-    """
-    Ambil data dari:
-    - sales_monthly
-    - external_data
-    dan join ke 1 panel: (area, cabang, sku, periode, qty, event_flag, holiday_count, rainfall).
-    """
-
     query = """
         SELECT
             s.area,
@@ -80,7 +64,7 @@ def fetch_monthly_panel_from_db(
     if df.empty:
         return df
 
-    # Normalisasi ke awal bulan (kalau user iseng isi tanggal 15)
+    # Normalisasi ke awal bulan 
     df["periode"] = pd.to_datetime(df["periode"])
     df["periode"] = df["periode"].dt.to_period("M").dt.to_timestamp()
 
@@ -95,16 +79,7 @@ def fetch_monthly_panel_from_db(
     return df
 
 
-# =========================================
-# 2. Lengkapi grid bulanan per (area, cabang, sku)
-# =========================================
-
 def build_monthly_grid(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Lengkapi semua bulan dari min(periode) sampai max(periode) per (area, cabang, sku).
-    Missing qty diisi 0, dan tandai imputed.
-    """
-
     if df.empty:
         return df
 
@@ -155,21 +130,7 @@ def build_monthly_grid(df: pd.DataFrame) -> pd.DataFrame:
     out = out.sort_values(["area", "cabang", "sku", "periode"]).reset_index(drop=True)
     return out
 
-
-# =========================================
-# 3. Fitur dasar time series (lag, rolling, kalender)
-# =========================================
-
 def add_base_ts_features(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Tambah fitur:
-    - event_flag_lag1, holiday_count_lag1, rainfall_lag1
-    - qty_lag1..qty_lag12
-    - qty_rollmean_3/6/12, qty_rollstd_3/6/12
-    - month, year, qtr
-    Semua rolling causal (hanya lihat masa lalu).
-    """
-
     df = df.copy()
     df = df.sort_values(["cabang", "sku", "periode"])
 
@@ -201,26 +162,16 @@ def add_base_ts_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
-# =========================================
-# 4. Flag train / test
-# =========================================
-
 def add_train_test_flags(
     df: pd.DataFrame,
     test_months: int = 4,
 ) -> pd.DataFrame:
-    """
-    Bagi panel jadi train + test:
-    - test = N bulan terakhir (test_months)
-    - train = sisanya sebelum itu
-    """
 
     df = df.copy()
     df = df.sort_values(["cabang", "sku", "periode"])
 
     max_per = df["periode"].max()
-    # contoh: test_months=4, ambil 4 bulan terakhir
+
     cutoff_start = (max_per.to_period("M") - (test_months - 1)).to_timestamp()
 
     df["is_test"] = (df["periode"] >= cutoff_start).astype("int8")
@@ -228,29 +179,12 @@ def add_train_test_flags(
 
     return df
 
-
-# =========================================
-# 5. Pipeline global: DB -> panel siap LGBM
-# =========================================
-
 def build_lgbm_ready_panel_from_db(
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     cabang_list: Optional[List[str]] = None,
     test_months: int = 4,
 ) -> pd.DataFrame:
-    """
-    Full pipeline global (tanpa train LGBM):
-    1) Tarik data dari DB
-    2) Lengkapi grid bulanan per SKU
-    3) Tambah fitur dasar TS
-    4) Flag train/test
-    5) Profil + clustering (A)
-    6) Stabilizer features (B)
-    7) Outlier winsorization (C)
-    8) Hierarchy / family (E)
-    Return: panel final siap dikasih ke trainer LGBM.
-    """
 
     # 1) tarik dari DB
     df = fetch_monthly_panel_from_db(

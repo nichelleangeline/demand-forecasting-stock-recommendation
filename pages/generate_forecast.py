@@ -1,6 +1,6 @@
-# pages/forecast_dashboard.py
-
 import datetime as dt
+import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -14,41 +14,52 @@ from app.services.model_service import get_all_model_runs
 from app.services.forecast_service import generate_and_store_forecast
 from app.loading_utils import init_loading_css
 from app.services.auth_guard import require_login
-from app.services.page_loader import page_loading, init_page_loader_css
+
+
+def _norm_str_series(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.strip().str.upper()
+
+
+def _parse_dt_any(val):
+    if val is None:
+        return None
+    if isinstance(val, dt.datetime):
+        return val
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        try:
+            ts = pd.to_datetime(s, errors="coerce")
+            if pd.isna(ts):
+                return None
+            return ts.to_pydatetime().replace(tzinfo=None)
+        except Exception:
+            return None
 
 
 def _get_last_forecast_generated(model_run_id: int):
-    """
-    Ambil info terakhir kali forecast future digenerate untuk model_run_id tertentu.
-    Disimpan di tabel forecast_config dengan key: LAST_FORECAST_GEN_{model_run_id}
-    """
     key = f"LAST_FORECAST_GEN_{model_run_id}"
     sql = """
-        SELECT config_value, updated_by, updated_at
+        SELECT config_value
         FROM forecast_config
         WHERE config_key = :k
+        LIMIT 1
     """
     with engine.connect() as conn:
         row = conn.execute(text(sql), {"k": key}).mappings().fetchone()
-
     if not row:
-        return None, None, None
+        return None
+    return _parse_dt_any(row.get("config_value"))
 
-    return row["config_value"], row.get("updated_by"), row.get("updated_at")
 
-
-def _set_last_forecast_generated(
-    model_run_id: int,
-    user_id: int | None,
-    when: dt.datetime | None = None,
-):
-    """Simpan timestamp terakhir generate forecast future ke forecast_config."""
+def _set_last_forecast_generated(model_run_id: int, user_id: int | None, when: dt.datetime | None = None):
     if when is None:
         when = dt.datetime.now()
-
     key = f"LAST_FORECAST_GEN_{model_run_id}"
     val = when.isoformat()
-
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -65,396 +76,555 @@ def _set_last_forecast_generated(
         )
 
 
-# Setup halaman
-st.set_page_config(
-    page_title="Forecast Penjualan",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+def _get_last_horizon(model_run_id: int) -> int | None:
+    key = f"LAST_HORIZON_{model_run_id}"
+    sql = """
+        SELECT config_value
+        FROM forecast_config
+        WHERE config_key = :k
+        LIMIT 1
+    """
+    with engine.connect() as conn:
+        row = conn.execute(text(sql), {"k": key}).mappings().fetchone()
+    if not row:
+        return None
+    try:
+        return int(str(row.get("config_value", "")).strip())
+    except Exception:
+        return None
 
-# Loader overlay nempel di konten utama
-init_page_loader_css()
 
-# Setup awal pakai loader
-with page_loading("Menyiapkan halaman Forecast..."):
+def _set_last_horizon(model_run_id: int, user_id: int | None, horizon: int):
+    key = f"LAST_HORIZON_{model_run_id}"
+    val = str(int(horizon))
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO forecast_config (config_key, config_value, updated_by)
+                VALUES (:k, :v, :u)
+                ON DUPLICATE KEY UPDATE
+                    config_value = VALUES(config_value),
+                    updated_by   = VALUES(updated_by),
+                    updated_at   = CURRENT_TIMESTAMP
+                """
+            ),
+            {"k": key, "v": val, "u": user_id},
+        )
+
+
+def _infer_max_lag_from_active_model(active_model: dict) -> int:
+    raw = active_model.get("feature_cols_json")
+    if not raw:
+        return 1
+    try:
+        cols = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return 1
+
+    max_lag = 0
+    for c in cols:
+        m = re.match(r"^qty_lag(\d+)$", str(c).strip())
+        if m:
+            max_lag = max(max_lag, int(m.group(1)))
+    return max(1, int(max_lag))
+
+
+def _mape(y_true, y_pred, eps=1e-8):
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    denom = np.maximum(np.abs(y_true), eps)
+    return float(np.mean(np.abs(y_true - y_pred) / denom) * 100.0)
+
+
+def _safe_int(x, default=0):
+    try:
+        return int(x)
+    except Exception:
+        return int(default)
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _load_forecast_join_snapshot(model_run_id: int) -> pd.DataFrame:
+    sql = """
+        SELECT
+            f.model_run_id,
+            f.area,
+            f.cabang,
+            f.sku,
+            f.periode,
+            f.qty_actual,
+            f.pred_qty,
+            f.is_train,
+            f.is_test,
+            f.is_future,
+            f.horizon
+        FROM forecast_monthly f
+        INNER JOIN model_run_sku s
+            ON  s.model_run_id = f.model_run_id
+            AND s.cabang      = f.cabang
+            AND s.sku         = f.sku
+            AND s.eligible_model = 1
+        WHERE f.model_run_id = :mid
+        ORDER BY f.cabang, f.sku, f.periode
+    """
+    with engine.connect() as conn:
+        df = pd.read_sql(
+            text(sql),
+            conn,
+            params={"mid": int(model_run_id)},
+            parse_dates=["periode"],
+        )
+    return df
+
+
+st.set_page_config(page_title="Forecast Penjualan", layout="wide", initial_sidebar_state="collapsed")
+
+with st.spinner("Menyiapkan halaman..."):
     require_login()
     inject_global_theme()
     render_sidebar_user_and_logout()
     init_loading_css()
 
-# Guard session
 if "user" not in st.session_state:
     st.error("Silakan login dulu.")
     st.stop()
 
 user = st.session_state["user"]
 user_id = user.get("user_id")
-role = user.get("role", "user")
-is_admin = str(role).lower() == "admin"
 
-# Header & info model aktif
-with page_loading("Mengambil model aktif dan konfigurasi forecast..."):
-    models = get_all_model_runs()
-    active_model = None
-    if models:
-        for m in models:
-            if m.get("active_flag") == 1:
-                active_model = m
-                break
 
-col_head1, col_head2 = st.columns([2, 1])
-
-with col_head1:
-    st.title("Forecast Data Penjualan")
-    st.caption("Pantau histori penjualan dan forecast stok per cabang & SKU.")
-
-with col_head2:
-    if not active_model:
-        st.warning("Belum ada model aktif. Set dulu di halaman Training / Kontrol Forecast.")
-    else:
-        with st.container(border=True):
-            st.markdown(f"**Model Aktif:** {active_model['model_type']} (ID {active_model['id']})")
-            st.caption(f"Train: {active_model.get('train_start')} s/d {active_model.get('train_end')}")
-            st.caption(f"Test: {active_model.get('test_start')} s/d {active_model.get('test_end')}")
-
-if not active_model:
-    st.stop()
-
-# CSS kecil untuk kartu & input
 st.markdown(
     """
     <style>
-    .metric-card {
-        background-color: white;
+    .header-wrap { margin-top: 6px; }
+    .model-card{
         border: 1px solid #e5e7eb;
-        border-radius: 8px;
-        padding: 16px;
-        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-        height: 100%;
+        border-radius: 14px;
+        padding: 12px 14px;
+        background: #ffffff;
+        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
     }
-    .metric-title {
-        font-size: 0.75rem;
-        font-weight: 600;
+    .model-k{
+        font-size: 11px;
+        font-weight: 900;
+        color: #64748b;
+        letter-spacing: .08em;
         text-transform: uppercase;
-        color: #6b7280;
-        margin-bottom: 4px;
-        letter-spacing: 0.05em;
+        margin-bottom: 6px;
     }
-    .metric-value {
-        font-size: 1.5rem;
-        font-weight: 700;
-        color: #111827;
-        line-height: 1.2;
+    .model-v{
+        font-size: 14px;
+        font-weight: 950;
+        color: #0f172a;
+        margin-bottom: 8px;
     }
-    .metric-sub {
-        font-size: 0.75rem;
-        color: #9ca3af;
+    .model-line{
+        font-size: 12px;
+        font-weight: 800;
+        color: #475569;
         margin-top: 4px;
     }
-    .modebar { display: none !important; }
-    [data-testid="stSelectbox"] div[data-baseweb="select"] > div {
-        background-color: #ffffff !important;
+    .section-title{
+        font-size: 16px;
+        font-weight: 950;
+        color:#0f172a;
+        margin: 8px 0 8px 0;
+    }
+    .metric-card {
+        background:#fff;
+        border:1px solid #e5e7eb;
+        border-radius:14px;
+        padding:14px 16px;
+        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+        height:100%;
+    }
+    .metric-title{
+        font-size:11px;
+        font-weight:900;
+        text-transform:uppercase;
+        color:#64748b;
+        letter-spacing:.08em;
+        margin-bottom:6px;
+    }
+    .metric-value{
+        font-size:24px;
+        font-weight:950;
+        color:#0f172a;
+        line-height:1.1;
+    }
+    .metric-sub{
+        font-size:12px;
+        color:#64748b;
+        margin-top:8px;
+        font-weight:700;
+    }
+    [data-testid="stVerticalBlockBorderWrapper"]{
+        border: 1px solid #e5e7eb !important;
+        border-radius: 16px !important;
+        box-shadow: 0 2px 10px rgba(15, 23, 42, 0.04);
+        background: #ffffff !important;
+    }
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] > div{
+        background: #ffffff !important;
+        border: 1px solid #e5e7eb !important;
+        border-radius: 12px !important;
+        min-height: 44px !important;
+        box-shadow: none !important;
+    }
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] span{
+        color: #0f172a !important;
+        font-weight: 800 !important;
+    }
+    div[data-testid="stSelectbox"] label{
+        color: #0f172a !important;
+        font-weight: 900 !important;
+    }
+    div[data-testid="stSelectbox"] div[data-baseweb="select"] svg{
+        fill: #0f172a !important;
+        color: #0f172a !important;
+    }
+    div[role="listbox"]{
+        background: #ffffff !important;
+        border: 1px solid #e5e7eb !important;
+        border-radius: 12px !important;
+        overflow: hidden !important;
+    }
+    div[role="option"]{
+        color: #0f172a !important;
+        background: #ffffff !important;
+        font-weight: 800 !important;
+    }
+    div[role="option"]:hover{
+        background: #f1f5f9 !important;
+    }
+    div[aria-selected="true"]{
+        background: #eff6ff !important;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Panel generate forecast future
-last_val, last_by, last_at = _get_last_forecast_generated(active_model["id"])
+with st.spinner("Mengambil model aktif..."):
+    models = get_all_model_runs()
 
-with st.expander("Generate Forecast Future & Simpan ke Database", expanded=False):
-    st.caption(
-        "Tombol ini hitung ulang forecast masa depan untuk seluruh cabang-SKU lalu simpan ke tabel "
-        "`forecast_monthly`."
-    )
+active_model = None
+if models:
+    for m in models:
+        if m.get("active_flag") == 1:
+            active_model = m
+            break
 
-    c_gen1, c_gen2 = st.columns([1, 2])
-
-    with c_gen1:
-        horizon_months = st.slider(
-            "Horizon Prediksi (bulan ke depan)",
-            min_value=1,
-            max_value=12,
-            value=6,
-            help="Berapa banyak bulan ke depan yang mau dihitung forecast-nya.",
-        )
-
-    with c_gen2:
-        if last_at:
-            ts_str = last_at.strftime("%d %b %Y, %H:%M")
-            st.markdown(f"**Terakhir generate:** {ts_str}")
-        else:
-            st.markdown("**Terakhir generate:** Belum pernah")
-
-        btn_generate = st.button(
-            "Generate & Simpan Forecast",
-            type="primary",
-            use_container_width=True,
-        )
-
-    if btn_generate:
-        try:
-            with st.spinner("Sedang memproses forecast dan menyimpan ke database..."):
-                n_rows = generate_and_store_forecast(horizon_months=horizon_months)
-                _set_last_forecast_generated(active_model["id"], user_id)
-            st.success(f"Berhasil. {n_rows} baris forecast tersimpan di database.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Gagal generate forecast: {e}")
-
-# Load data forecast dari DB
-with page_loading("Memuat data forecast dari database..."):
-    with engine.connect() as conn:
-        df = pd.read_sql(
-            text(
-                """
-                SELECT
-                    model_run_id,
-                    area,
-                    cabang,
-                    sku,
-                    periode,
-                    qty_actual,
-                    pred_qty,
-                    is_train,
-                    is_test,
-                    is_future,
-                    horizon
-                FROM forecast_monthly
-                WHERE model_run_id = :mid
-                ORDER BY cabang, sku, periode
-                """
-            ),
-            conn,
-            params={"mid": active_model["id"]},
-            parse_dates=["periode"],
-        )
-
-if df.empty:
-    st.warning("Data forecast kosong. Jalankan generate forecast dulu.")
+if not active_model:
+    st.warning("Belum ada model aktif.")
     st.stop()
 
-# Normalisasi tipe data
+model_run_id = int(active_model["id"])
+model_type = str(active_model.get("model_type", "")).upper()
+
+gen_key_req = f"gen_req_{model_run_id}"
+gen_key_run = f"gen_run_{model_run_id}"
+gen_key_h = f"gen_h_{model_run_id}"
+
+if gen_key_req not in st.session_state:
+    st.session_state[gen_key_req] = False
+if gen_key_run not in st.session_state:
+    st.session_state[gen_key_run] = False
+if gen_key_h not in st.session_state:
+    st.session_state[gen_key_h] = None
+
+st.markdown('<div class="header-wrap">', unsafe_allow_html=True)
+h1, h2 = st.columns([2.2, 1], gap="large")
+
+with h1:
+    st.title("Forecast Penjualan")
+
+with h2:
+    st.markdown(
+        f"""
+        <div class="model-card">
+          <div class="model-k">Model aktif</div>
+          <div class="model-v">{model_type} (ID {model_run_id})</div>
+          <div class="model-line">Latih: {active_model.get('train_start')} s/d {active_model.get('train_end')}</div>
+          <div class="model-line">Uji: {active_model.get('test_start')} s/d {active_model.get('test_end')}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+st.markdown("</div>", unsafe_allow_html=True)
+
+
+last_at = _get_last_forecast_generated(model_run_id)
+last_h = _get_last_horizon(model_run_id)
+
+default_h = int(last_h) if last_h is not None else 1
+default_h = max(1, min(240, default_h))
+
+with st.expander("Generate Forecast Future", expanded=False):
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2], gap="large")
+
+    with c1:
+        horizon_months = st.number_input(
+            "Horizon (bulan)",
+            min_value=1,
+            max_value=240,
+            value=int(st.session_state[gen_key_h] or default_h),
+            step=1,
+            key=f"horizon_input_{model_run_id}",
+            disabled=bool(st.session_state[gen_key_run]),
+        )
+
+    with c2:
+        st.write("")
+        clicked = st.button(
+            "Generate & Simpan",
+            type="primary",
+            use_container_width=True,
+            key=f"btn_gen_{model_run_id}",
+            disabled=bool(st.session_state[gen_key_run]),
+        )
+
+    with c3:
+        st.write("")
+        reset = st.button(
+            "Reset",
+            use_container_width=True,
+            key=f"btn_gen_reset_{model_run_id}",
+        )
+
+    with c4:
+        if last_at:
+            st.markdown(f"Terakhir generate: {last_at.strftime('%d %b %Y %H:%M')}")
+        else:
+            st.markdown("Terakhir generate: -")
+
+        if st.session_state[gen_key_run]:
+            st.caption("Status: sedang proses. Kalau stuck, tekan Reset.")
+
+    if reset:
+        st.session_state[gen_key_req] = False
+        st.session_state[gen_key_run] = False
+        st.session_state[gen_key_h] = None
+        st.cache_data.clear()
+        st.rerun()
+
+    if clicked:
+        st.session_state[gen_key_h] = int(horizon_months)
+        st.session_state[gen_key_req] = True
+        st.session_state[gen_key_run] = True
+        st.rerun()
+
+
+if st.session_state[gen_key_req] and st.session_state[gen_key_run]:
+    h = int(st.session_state[gen_key_h] or default_h)
+
+    with st.spinner("Menghitung dan menyimpan forecast..."):
+        try:
+            n_rows = generate_and_store_forecast(model_run_id=model_run_id, horizon_months=h)
+
+            _set_last_forecast_generated(model_run_id, user_id)
+            _set_last_horizon(model_run_id, user_id, h)
+
+            st.cache_data.clear()
+
+            st.session_state[gen_key_req] = False
+            st.session_state[gen_key_run] = False
+            st.session_state[gen_key_h] = None
+
+            st.success(f"Selesai. {int(n_rows):,} baris tersimpan.")
+            st.rerun()
+        except Exception:
+            st.session_state[gen_key_req] = False
+            st.session_state[gen_key_run] = False
+            st.session_state[gen_key_h] = None
+            st.error("Generate gagal. Silakan coba lagi atau hubungi admin.")
+            st.stop()
+
+with st.spinner("Memuat data forecast..."):
+    df = _load_forecast_join_snapshot(model_run_id)
+
+if df.empty:
+    st.warning("Data forecast kosong. Generate dulu.")
+    st.stop()
+
+df["cabang"] = _norm_str_series(df["cabang"])
+df["sku"] = _norm_str_series(df["sku"])
+if "area" in df.columns:
+    df["area"] = df["area"].astype(str).str.strip()
+
 df["qty_actual"] = pd.to_numeric(df["qty_actual"], errors="coerce")
 df["pred_qty"] = pd.to_numeric(df["pred_qty"], errors="coerce")
-df["is_train"] = df["is_train"].astype(int)
-df["is_test"] = df["is_test"].astype(int)
-df["is_future"] = df["is_future"].astype(int)
-df["horizon"] = df["horizon"].fillna(0).astype(int)
+df["is_train"] = pd.to_numeric(df["is_train"], errors="coerce").fillna(0).astype(int)
+df["is_test"] = pd.to_numeric(df["is_test"], errors="coerce").fillna(0).astype(int)
+df["is_future"] = pd.to_numeric(df["is_future"], errors="coerce").fillna(0).astype(int)
+df["horizon"] = pd.to_numeric(df["horizon"], errors="coerce").fillna(0).astype(int)
 
-future_mask = df["is_future"] == 1
-has_future = future_mask.any()
+has_future = (df["is_future"] == 1).any()
 
-# Filter tampilan
-st.markdown("### Filter Tampilan")
+st.markdown('<div class="section-title">Filter</div>', unsafe_allow_html=True)
 
 with st.container(border=True):
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3, f4 = st.columns(4, gap="large")
 
     with f1:
-        view_mode = st.selectbox(
-            "Rentang Periode",
-            options=["12 bulan terakhir", "Semua histori + future"],
-            index=0,
-        )
+        view_mode = st.selectbox("Periode", ["12 bulan terakhir", "Semua histori + future"], index=0)
 
     with f2:
         if has_future:
-            max_future_h = int(df.loc[future_mask, "horizon"].max())
+            max_future_h = _safe_int(df.loc[df["is_future"] == 1, "horizon"].max(), default=0)
+            max_future_h = max(1, max_future_h)
             horizon_options = list(range(1, max_future_h + 1))
-            default_idx = len(horizon_options) - 1
+
+            saved_h = _get_last_horizon(model_run_id)
+            if saved_h is not None and int(saved_h) in horizon_options:
+                default_idx = horizon_options.index(int(saved_h))
+            else:
+                default_idx = len(horizon_options) - 1
 
             view_horizon = st.selectbox(
-                "Max Horizon Future",
+                "Future sampai (bulan)",
                 options=horizon_options,
                 index=default_idx,
-                format_func=lambda x: f"{x}",
-                help="Pilih sampai bulan ke berapa forecast future ditampilkan.",
+                key=f"view_h_{model_run_id}",
             )
         else:
             view_horizon = None
-            st.selectbox(
-                "Max Horizon Future",
-                options=["Tidak ada data future"],
-                index=0,
-                disabled=True,
-            )
+            st.selectbox("Future sampai (bulan)", options=["-"], index=0, disabled=True)
 
     with f3:
         cabang_list = sorted(df["cabang"].dropna().unique().tolist())
-        if not cabang_list:
-            st.error("Tidak ada data cabang di tabel forecast.")
-            st.stop()
-
-        cabang_selected = st.selectbox(
-            "Pilih Cabang",
-            options=cabang_list,
-            index=0,
-        )
+        cabang_selected = st.selectbox("Cabang", options=cabang_list, index=0)
 
     with f4:
-        df_for_sku = df[df["cabang"] == cabang_selected]
-        sku_list = sorted(df_for_sku["sku"].dropna().unique().tolist())
-        if not sku_list:
-            st.error("Tidak ada SKU untuk cabang ini.")
-            st.stop()
+        sku_list = sorted(df.loc[df["cabang"] == cabang_selected, "sku"].dropna().unique().tolist())
+        sku_selected = st.selectbox("Produk", options=sku_list, index=0)
 
-        sku_selected = st.selectbox(
-            "Pilih SKU",
-            options=sku_list,
-            index=0,
-        )
-
-df_view = df.copy()
-df_view = df_view[df_view["cabang"] == cabang_selected]
-df_view = df_view[df_view["sku"] == sku_selected]
+df_view = df[(df["cabang"] == cabang_selected) & (df["sku"] == sku_selected)].copy()
 
 if has_future and view_horizon is not None:
-    df_view = df_view[
-        (df_view["is_future"] == 0) | (df_view["horizon"] <= view_horizon)
-    ]
+    df_view = df_view[(df_view["is_future"] == 0) | (df_view["horizon"] <= int(view_horizon))]
+
+df_view = df_view.sort_values("periode").reset_index(drop=True)
+if df_view.empty:
+    st.warning("Data kosong.")
+    st.stop()
+
+# hide in-sample prediction until lag complete
+max_lag_used = _infer_max_lag_from_active_model(active_model)
+first_obs = df_view.loc[df_view["qty_actual"].notna(), "periode"].min()
+if pd.notna(first_obs):
+    valid_pred_start = (first_obs.to_period("M") + int(max_lag_used)).to_timestamp()
+    df_view.loc[(df_view["is_future"] == 0) & (df_view["periode"] < valid_pred_start), "pred_qty"] = np.nan
 
 if view_mode == "12 bulan terakhir":
     last_date = df_view["periode"].max()
     if pd.notna(last_date):
         cutoff = (last_date.to_period("M") - 11).to_timestamp()
-        df_view = df_view[df_view["periode"] >= cutoff]
+        df_view = df_view[df_view["periode"] >= cutoff].copy()
 
-df_view = df_view.sort_values(["cabang", "sku", "periode"]).reset_index(drop=True)
+df_view = df_view.sort_values("periode").reset_index(drop=True)
 
-if df_view.empty:
-    st.warning("Data kosong setelah filter. Coba ubah filter.")
-    st.stop()
+st.markdown('<div class="section-title">Ringkasan</div>', unsafe_allow_html=True)
 
-# KPI kecil di atas grafik
-def _mape(y_true, y_pred, eps=1e-8):
-    y_true = np.asarray(y_true, dtype=float)
-    y_pred = np.asarray(y_pred, dtype=float)
-    denom = np.maximum(np.abs(y_true), eps)
-    return np.mean(np.abs(y_true - y_pred) / denom) * 100.0
-
-
-future_view = df_view[df_view["is_future"] == 1]
+future_view = df_view[df_view["is_future"] == 1].copy()
 total_pred_future = float(future_view["pred_qty"].sum()) if not future_view.empty else 0.0
 
-test_mask = (df_view["is_test"] == 1) & df_view["qty_actual"].notna()
-if test_mask.any():
-    mape_test_val = _mape(
-        df_view.loc[test_mask, "qty_actual"], df_view.loc[test_mask, "pred_qty"]
-    )
-else:
-    mape_test_val = None
+test_mask = (df_view["is_test"] == 1) & df_view["qty_actual"].notna() & df_view["pred_qty"].notna()
+mape_test_val = _mape(df_view.loc[test_mask, "qty_actual"], df_view.loc[test_mask, "pred_qty"]) if test_mask.any() else None
 
-st.markdown("### Ringkasan Forecast")
-
-k1, k2 = st.columns(2)
+k1, k2 = st.columns(2, gap="large")
 
 
-def render_card(col, title, value, sub, color=None):
-    style_color = f"color: {color};" if color else ""
+def _card(col, title, value, sub):
     with col:
         st.markdown(
             f"""
             <div class="metric-card">
-                <div class="metric-title">{title}</div>
-                <div class="metric-value" style="{style_color}">{value}</div>
-                <div class="metric-sub">{sub}</div>
+              <div class="metric-title">{title}</div>
+              <div class="metric-value">{value}</div>
+              <div class="metric-sub">{sub}</div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
 
-render_card(
-    k1,
-    "Total Prediksi Future",
-    f"{total_pred_future:,.0f}",
-    "Total qty prediksi untuk cabang & SKU ini.",
-)
+_card(k1, "Total prediksi future", f"{total_pred_future:,.0f}", "Total prediksi sesuai horizon yang dipilih.")
+_card(k2, "MAPE test", (f"{mape_test_val:,.1f}%" if mape_test_val is not None else "-"), "Akurasi di periode test (kalau ada).")
 
-mape_str = f"{mape_test_val:,.1f}%" if mape_test_val is not None else "-"
-render_card(
-    k2,
-    "MAPE Data Test",
-    mape_str,
-    "Perbandingan prediksi vs aktual di periode test.",
-    color="#2563eb",
-)
-
-# Grafik tren aktual vs prediksi
-st.markdown("### Visualisasi Tren & Prediksi")
+st.markdown('<div class="section-title">Grafik</div>', unsafe_allow_html=True)
 
 with st.container(border=True):
-    df_chart = df_view[["periode", "qty_actual", "pred_qty"]].copy()
-    df_chart = df_chart[
-        df_chart["qty_actual"].notna() | df_chart["pred_qty"].notna()
-    ]
-    df_chart = df_chart.sort_values("periode")
+    df_chart = df_view[["periode", "qty_actual", "pred_qty"]].copy().sort_values("periode")
 
-    if df_chart.empty:
-        st.info("Tidak ada data untuk ditampilkan di grafik.")
+    actual = df_chart[df_chart["qty_actual"].notna()][["periode", "qty_actual"]]
+    pred = df_chart[df_chart["pred_qty"].notna()][["periode", "pred_qty"]]
+
+    if actual.empty and pred.empty:
+        st.info("Tidak ada data grafik.")
     else:
-        plot_df = df_chart.melt(
-            id_vars=["periode"],
-            value_vars=["qty_actual", "pred_qty"],
-            var_name="series",
-            value_name="qty",
-        )
-        series_map = {"qty_actual": "Aktual", "pred_qty": "Prediksi"}
-        plot_df["series"] = plot_df["series"].map(series_map)
+        fig = px.line()
 
-        fig = px.line(
-            plot_df,
-            x="periode",
-            y="qty",
-            color="series",
-            markers=True,
-            color_discrete_map={
-                "Aktual": "#2563eb",
-                "Prediksi": "#f97316",
-            },
-            labels={"periode": "Periode", "qty": "Qty", "series": ""},
-        )
+        if not actual.empty:
+            fig.add_scatter(
+                x=actual["periode"],
+                y=actual["qty_actual"],
+                mode="lines+markers",
+                name="Aktual",
+                line=dict(color="#2563eb", width=3),
+                marker=dict(size=6, color="#2563eb"),
+            )
 
-        fig.update_traces(line=dict(width=2.5))
+        if not pred.empty:
+            fig.add_scatter(
+                x=pred["periode"],
+                y=pred["pred_qty"],
+                mode="lines+markers",
+                name="Prediksi",
+                line=dict(color="#f97316", width=3, dash="dash"),
+                marker=dict(size=6, color="#f97316"),
+            )
+
+        all_x = pd.concat([actual["periode"], pred["periode"]], ignore_index=True).dropna()
+        xmin, xmax = all_x.min(), all_x.max()
+        pad = pd.Timedelta(days=15)
+
+        fig.update_xaxes(range=[xmin - pad, xmax + pad], fixedrange=True, showgrid=False, tickformat="%b %Y")
+        fig.update_yaxes(fixedrange=True, showgrid=True, gridcolor="#e5e7eb")
+
         fig.update_layout(
             template="plotly_white",
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1,
-                title=None,
-            ),
-            margin=dict(l=20, r=20, t=30, b=20),
+            height=380,
             hovermode="x unified",
-            xaxis=dict(showgrid=False),
-            yaxis=dict(showgrid=True, gridcolor="#f3f4f6"),
-            height=400,
+            margin=dict(l=24, r=24, t=24, b=24),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1, title=None),
         )
 
-        dmin, dmax = df_chart["periode"].min(), df_chart["periode"].max()
-        months_span = (dmax.year - dmin.year) * 12 + (dmax.month - dmin.month)
-        dtick_val = "M3" if months_span > 18 else "M1"
-        fig.update_xaxes(dtick=dtick_val, tickformat="%b %Y")
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={
+                "displayModeBar": False,
+                "scrollZoom": False,
+                "doubleClick": False,
+                "editable": False,
+                "staticPlot": False,
+            },
+        )
 
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-# Tabel & download CSV
-st.markdown("### Detail Data Forecast")
+st.markdown('<div class="section-title">Tabel</div>', unsafe_allow_html=True)
 
 with st.container(border=True):
     df_download = df_view.copy().sort_values(["cabang", "sku", "periode"])
     csv_bytes = df_download.to_csv(index=False).encode("utf-8-sig")
 
-    col_d1, col_d2 = st.columns([5, 1])
+    col_d1, col_d2 = st.columns([5, 1], gap="large")
     with col_d2:
         st.download_button(
             "Download CSV",
             data=csv_bytes,
-            file_name=f"forecast_{active_model['id']}_{cabang_selected}_{sku_selected}.csv",
+            file_name=f"forecast_{model_run_id}_{cabang_selected}_{sku_selected}.csv",
             mime="text/csv",
             use_container_width=True,
         )
@@ -464,59 +634,19 @@ with st.container(border=True):
         use_container_width=True,
         hide_index=True,
         column_config={
-            "model_run_id": st.column_config.NumberColumn(
-                "Model ID",
-                help="ID model yang dipakai untuk forecast ini.",
-            ),
-            "area": st.column_config.TextColumn(
-                "Area",
-                help="Area / region cabang.",
-            ),
-            "cabang": st.column_config.TextColumn(
-                "Cabang",
-                help="Kode cabang.",
-            ),
-            "sku": st.column_config.TextColumn(
-                "SKU",
-                help="Kode barang.",
-            ),
-            "periode": st.column_config.DateColumn(
-                "Periode",
-                format="D MMM YYYY",
-                help="Bulan transaksi / forecast.",
-            ),
-            "qty_actual": st.column_config.NumberColumn(
-                "Qty Aktual",
-                format="%.0f",
-                help="Qty penjualan asli pada periode tersebut.",
-            ),
-            "pred_qty": st.column_config.NumberColumn(
-                "Qty Prediksi",
-                format="%.0f",
-                help="Qty hasil prediksi model.",
-            ),
-            "is_train": st.column_config.CheckboxColumn(
-                "Train",
-                help="Centang = baris ini masuk data training.",
-                disabled=True,
-            ),
-            "is_test": st.column_config.CheckboxColumn(
-                "Test",
-                help="Centang = baris ini masuk data test / validasi.",
-                disabled=True,
-            ),
-            "is_future": st.column_config.CheckboxColumn(
-                "Future",
-                help="Centang = baris ini hasil forecast masa depan (tanpa aktual).",
-                disabled=True,
-            ),
-            "horizon": st.column_config.NumberColumn(
-                "Horizon",
-                format="%d",
-                help="Jarak bulan dari titik terakhir histori. 1 = bulan depan, 2 = dua bulan lagi, dst.",
-            ),
+            "model_run_id": st.column_config.NumberColumn("Model ID"),
+            "area": st.column_config.TextColumn("Area"),
+            "cabang": st.column_config.TextColumn("Cabang"),
+            "sku": st.column_config.TextColumn("Produk"),
+            "periode": st.column_config.DateColumn("Periode", format="D MMM YYYY"),
+            "qty_actual": st.column_config.NumberColumn("Aktual", format="%.0f"),
+            "pred_qty": st.column_config.NumberColumn("Prediksi", format="%.0f"),
+            "is_train": st.column_config.CheckboxColumn("Train", disabled=True),
+            "is_test": st.column_config.CheckboxColumn("Test", disabled=True),
+            "is_future": st.column_config.CheckboxColumn("Future", disabled=True),
+            "horizon": st.column_config.NumberColumn("Horizon", format="%d"),
         },
     )
 
     if len(df_download) > 1000:
-        st.caption("Menampilkan 1.000 baris pertama. Untuk lengkapnya silakan download CSV.")
+        st.caption("Tabel dibatasi 1.000 baris. Download untuk lengkap.")

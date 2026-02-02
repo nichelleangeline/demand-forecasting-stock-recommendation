@@ -1,29 +1,15 @@
-# app/services/forecast_future_service.py
-
 import json
 from pathlib import Path
 from typing import Dict, List, Tuple
-
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
-
 from app.db import engine
 from app.inference.predict_cluster_pipeline import load_cluster_models
 from app.services.model_service import get_all_model_runs
 
 
-# =========================================================
-# Helper ambil model_run aktif
-# =========================================================
-
 def _get_active_model_run() -> Dict:
-    """
-    Ambil satu row model_run yang dipakai sebagai 'aktif'.
-    Prioritas:
-      1) active_flag = 1, trained_at terbaru
-      2) kalau tidak ada, ambil trained_at terbaru saja
-    """
     runs = get_all_model_runs()
     if not runs:
         return None
@@ -49,16 +35,8 @@ def _safe_load_json(value):
             return None
     return None
 
-
-# =========================================================
-# Ambil exog future dari DB
-# =========================================================
-
 def _build_future_exog(cabang: str, periode: pd.Timestamp) -> Dict:
-    """
-    Ambil exogenous data untuk periode tertentu.
-    Kalau tidak ada di DB, fallback ke 0.
-    """
+
     sql = """
         SELECT event_flag, holiday_count, rainfall
         FROM external_data
@@ -86,15 +64,7 @@ def _build_future_exog(cabang: str, periode: pd.Timestamp) -> Dict:
     }
 
 
-# =========================================================
-# Deteksi fitur dinamis vs statis
-# =========================================================
-
 def _split_dynamic_static_features(feature_cols: List[str]) -> Tuple[List[str], List[str]]:
-    """
-    Pisahkan fitur yang berubah setiap periode (lag, rolling, waktu, exog)
-    vs fitur yang dianggap statis per (cabang, sku).
-    """
     dynamic_keywords = [
         "qty_lag",
         "qty_rollmean",
@@ -118,24 +88,12 @@ def _split_dynamic_static_features(feature_cols: List[str]) -> Tuple[List[str], 
 
     return dynamic_cols, static_cols
 
-
-# =========================================================
-# Forecast future untuk satu series (cabang+sku)
-# =========================================================
-
 def _forecast_series_future(
     hist: pd.DataFrame,
     model,
     feature_cols: List[str],
     horizon: int,
 ) -> pd.DataFrame:
-    """
-    hist: DataFrame untuk satu (cabang, sku) yang sudah punya fitur lengkap
-          seperti di training panel_with_predictions.csv (termasuk feature_cols).
-    model: LightGBM booster untuk cluster series ini.
-    feature_cols: urutan fitur PERSIS seperti waktu training.
-    horizon: berapa bulan ke depan.
-    """
     if hist.empty:
         return pd.DataFrame()
 
@@ -252,10 +210,8 @@ def _forecast_series_future(
                 last6 = _last_k(arr, 6)
                 feat["qty_rollstd_6"] = float(last6.std(ddof=0)) if len(last6) > 0 else 0.0
 
-        # pastikan semua feature_cols ada
         for c in feature_cols:
             if c not in feat:
-                # fallback: kalau ada di hist, pakai last_row; kalau tidak, 0
                 if c in hist.columns:
                     feat[c] = last_row[c]
                 else:
@@ -301,11 +257,6 @@ def _forecast_series_future(
 
     return pd.DataFrame(future_rows)
 
-
-# =========================================================
-# Simpan ke DB
-# =========================================================
-
 def _save_future_to_db(df_future: pd.DataFrame, model_run_id: int):
     if df_future.empty:
         return
@@ -350,10 +301,6 @@ def _save_future_to_db(df_future: pd.DataFrame, model_run_id: int):
             )
 
 
-# =========================================================
-# FUNGSI UTAMA: FORECAST PANEL FUTURE
-# =========================================================
-
 def build_future_panel_and_forecast_all(
     engine,
     train_end: pd.Timestamp,
@@ -361,17 +308,7 @@ def build_future_panel_and_forecast_all(
     run_dir: Path,
     feature_cols: List[str],
 ) -> pd.DataFrame:
-    """
-    Dipanggil dari pages/forecast_dashboard.py.
 
-    - Ambil model_run aktif (ID + params_json).
-    - Load panel_with_predictions.csv dari run_dir / params_json.panel_path.
-    - Ambil semua kombinasi (area, cabang, sku) dari panel → ini SKU yang ikut training (eligible).
-    - Load model cluster dari folder models/.
-    - Forecast ke depan untuk tiap series.
-    - Simpan hasil ke tabel forecast_future.
-    - Return df_future (untuk ditampilkan di dashboard).
-    """
     active = _get_active_model_run()
     if active is None:
         raise RuntimeError("Tidak ada model_run di DB.")
@@ -388,7 +325,6 @@ def build_future_panel_and_forecast_all(
             run_dir = Path(params["run_dir"])
             panel_path = run_dir / "panel_with_predictions.csv"
 
-    # fallback: pakai run_dir argumen
     if panel_path is None:
         panel_path = Path(run_dir) / "panel_with_predictions.csv"
 

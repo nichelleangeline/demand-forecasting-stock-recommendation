@@ -1,22 +1,19 @@
-# seed_admin.py
 import hashlib
 from sqlalchemy import text
 from app.db import engine
 
 def hash_password(raw: str) -> str:
-    # Simple SHA256; cukup buat skripsi & lokal
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def main():
     admin_email = "admin@tktw.local"
     admin_name = "Admin TKTW"
-    raw_password = "admin123"  # nanti kamu pakai ini di login awal
+    raw_password = "admin123" 
 
     pwd_hash = hash_password(raw_password)
 
     with engine.begin() as conn:
-        # Cek sudah ada atau belum
         res = conn.execute(
             text(
                 "SELECT user_id FROM user_account WHERE email = :email"
@@ -28,7 +25,6 @@ def main():
             print("Admin sudah ada, user_id:", res[0])
             return
 
-        # Insert admin baru
         conn.execute(
             text(
                 """

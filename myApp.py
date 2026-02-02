@@ -1,6 +1,4 @@
-# myApp.py
 import streamlit as st
-
 from app.loading_utils import init_loading_css
 from app.services.auth_service import (
     get_user_by_email,
@@ -11,7 +9,7 @@ from app.services.auth_service import (
 )
 from app.services.page_loader import (
     init_page_loader_css,
-    page_loading,   # loader overlay per aksi
+    page_loading,   
 )
 
 # 1. PAGE CONFIG
@@ -21,9 +19,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Loader kecil untuk tombol / proses singkat
 init_loading_css()
-# Loader overlay untuk proses yang pakai page_loading(...)
 init_page_loader_css()
 
 # 2. CSS GLOBAL (LOGIN + FORGOT + VERIFY)

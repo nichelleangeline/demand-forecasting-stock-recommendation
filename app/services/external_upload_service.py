@@ -1,14 +1,10 @@
-# app/services/external_upload_service.py
-
 from typing import Tuple, List, Dict, Optional
-
 import numpy as np
 import pandas as pd
 from sqlalchemy import text
-
 from app.db import engine
 
-# mapping area sama seperti pipeline offline
+
 AREA_MAP = {
     "02A": "1A",
     "05A": "1B",
@@ -21,23 +17,12 @@ AREA_MAP = {
     "29A": "06",
 }
 
-
-# =========================
-# Helpers umum
-# =========================
-
 def _to_month_start(s: pd.Series) -> pd.Series:
     s = pd.to_datetime(s, errors="coerce")
     return s.dt.to_period("M").dt.to_timestamp()
 
 
 def _get_all_cabang_with_area() -> List[Dict[str, str]]:
-    """
-    Ambil daftar cabang + area yang valid dari DB.
-    Prioritas:
-      1) config_cabang
-      2) fallback ke sales_monthly
-    """
     with engine.begin() as conn:
         rows = conn.execute(
             text("SELECT area, cabang FROM config_cabang ORDER BY cabang")
@@ -55,18 +40,7 @@ def _get_all_cabang_with_area() -> List[Dict[str, str]]:
     return [{"area": r[0], "cabang": r[1]} for r in rows]
 
 
-# =========================
-# 1) HARI LIBUR NASIONAL
-# =========================
-
 def _process_holiday_df(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Input contoh:
-        bulan,hari_libur
-        2021-01-01,1
-        ...
-    Output: df [periode, holiday_count]
-    """
     df = df_raw.copy()
     df.columns = [str(c).strip().lower() for c in df.columns]
 
@@ -87,7 +61,6 @@ def _process_holiday_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     elif "hari_libur" in df.columns:
         cnt_col = "hari_libur"
     else:
-        # pakai kolom kedua kalau ada
         if len(df.columns) < 2:
             raise ValueError("File hari libur tidak punya kolom jumlah hari libur.")
         cnt_col = df.columns[1]
@@ -113,18 +86,9 @@ def _process_holiday_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# =========================
-# 2) EVENT GATHERING
-# =========================
 
 def _process_event_df(df_raw: pd.DataFrame,
                       allowed_cabangs: List[Dict[str, str]]) -> pd.DataFrame:
-    """
-    Input: file wide seperti contohmu
-        Gatering Date, 02A, 05A, ...
-    Output: df [periode, cabang, event_flag]
-    Hanya cabang yang ada di allowed_cabangs yang dipakai.
-    """
     df = df_raw.copy()
     df.columns = [str(c).strip().lower() for c in df.columns]
 
@@ -160,7 +124,6 @@ def _process_event_df(df_raw: pd.DataFrame,
         .clip(lower=0)
     )
 
-    # filter hanya cabang yang valid (ada di config_cabang / sales_monthly)
     valid_cab_set = {c["cabang"] for c in allowed_cabangs}
     tmp = tmp[tmp["cabang"].isin(valid_cab_set)]
 
@@ -173,20 +136,10 @@ def _process_event_df(df_raw: pd.DataFrame,
     return ev
 
 
-# =========================
-# 3) CURAH HUJAN 16C
-# =========================
-
 def _process_rain_16c_df(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """
-    Input: daily rainfall Surabaya 16C
-        Tanggal, RR
-    Output: df [periode, cabang, rainfall] , cabang selalu "16C"
-    """
     rf = df_raw.copy()
     rf.columns = [str(c).strip().lower() for c in rf.columns]
 
-    # cari kolom tanggal & hujan
     date_col = next((c for c in rf.columns if "tanggal" in c or "date" in c), rf.columns[0])
     rain_col = next((c for c in rf.columns if "rr" in c or "rain" in c), None)
     if rain_col is None:
@@ -194,7 +147,6 @@ def _process_rain_16c_df(df_raw: pd.DataFrame) -> pd.DataFrame:
 
     rf = rf.rename(columns={date_col: "date", rain_col: "rain"})
 
-    # parse tanggal
     rf["date"] = pd.to_datetime(rf["date"], errors="coerce", dayfirst=True)
     if rf["date"].isna().all():
         rf["date"] = pd.to_datetime(
@@ -208,7 +160,6 @@ def _process_rain_16c_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     if rf.empty:
         raise ValueError("Tidak ada tanggal valid di file curah hujan.")
 
-    # bersihkan rain
     rf["rain"] = pd.to_numeric(rf["rain"], errors="coerce")
     rf.loc[(rf["rain"] == 8888) | (rf["rain"] < 0), "rain"] = np.nan
 
@@ -245,28 +196,11 @@ def _process_rain_16c_df(df_raw: pd.DataFrame) -> pd.DataFrame:
     rain_16 = rain_16[["periode", "cabang", "rainfall"]]
     return rain_16
 
-
-# =========================
-# 4) MAIN: handle_external_upload
-# =========================
-
 def handle_external_upload(
     uploaded_file,
     jenis: str,
     uploaded_by: Optional[int] = None,
 ) -> Tuple[pd.DataFrame, int]:
-    """
-    Dipanggil dari UI:
-        df_result, n_rows = handle_external_upload(uploaded_file, jenis="holiday"/"event"/"rainfall_16c")
-
-    Perilaku:
-      - TIDAK menghapus data lama.
-      - Upsert per (cabang, periode).
-      - Hanya update kolom yang relevan:
-          * holiday  -> holiday_count
-          * event    -> event_flag
-          * rainfall -> rainfall
-    """
     if uploaded_file is None:
         raise ValueError("File eksternal kosong.")
 
@@ -289,7 +223,6 @@ def handle_external_upload(
         if not allowed_cabangs:
             raise ValueError("Tidak ada konfigurasi cabang/area di DB untuk menyebar holiday.")
 
-        # expand ke semua cabang valid
         records = []
         for _, row in hol.iterrows():
             periode = pd.to_datetime(row["periode"]).date()
@@ -327,7 +260,6 @@ def handle_external_upload(
         with engine.begin() as conn:
             conn.execute(text(sql), records)
 
-        # untuk preview di UI: satu row per (periode, holiday_count)
         df_preview = hol.copy()
         n_rows = len(records)
 

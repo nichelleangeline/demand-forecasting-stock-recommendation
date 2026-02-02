@@ -1,5 +1,3 @@
-# app/features/hierarchy_features.py
-
 import pandas as pd
 
 def add_hierarchy_features(df: pd.DataFrame) -> pd.DataFrame:

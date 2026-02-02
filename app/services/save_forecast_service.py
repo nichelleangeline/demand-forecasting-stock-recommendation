@@ -1,5 +1,3 @@
-# app/services/save_forecast_service.py
-
 from sqlalchemy import text
 
 def save_future_to_db(engine, df_future, model_run_id):

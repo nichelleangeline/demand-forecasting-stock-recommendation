@@ -1,13 +1,9 @@
-# app/services/config_cabang_service.py
-
 from typing import List, Dict, Optional
-
 from sqlalchemy import text
 from app.db import engine
 
 
 def get_all_cabang_config() -> List[Dict]:
-    """Ambil semua config_cabang."""
     with engine.begin() as conn:
         rows = conn.execute(
             text("""
@@ -30,7 +26,6 @@ def get_all_cabang_config() -> List[Dict]:
 
 
 def get_cabang_config_by_id(cfg_id: int) -> Optional[Dict]:
-    """Ambil satu baris config_cabang berdasarkan id."""
     with engine.begin() as conn:
         row = conn.execute(
             text("""
@@ -64,7 +59,6 @@ def create_cabang_config(
     is_active: bool = True,
     updated_by: Optional[int] = None,
 ) -> int:
-    """Tambah baris baru ke config_cabang."""
     with engine.begin() as conn:
         result = conn.execute(
             text("""
@@ -117,7 +111,6 @@ def update_cabang_config(
     is_active: bool,
     updated_by: Optional[int] = None,
 ) -> None:
-    """Update parameter config_cabang untuk 1 cabang."""
     with engine.begin() as conn:
         conn.execute(
             text("""

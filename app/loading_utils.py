@@ -1,13 +1,5 @@
-# app/ui/loading_utils.py
-
 import streamlit as st
-
-
 def init_loading_css():
-    """
-    Panggil sekali di awal setiap page.
-    Inject CSS untuk overlay loading.
-    """
     st.markdown(
         """
         <style>
@@ -51,9 +43,6 @@ def init_loading_css():
 
 
 def _render_overlay(message: str):
-    """
-    Dipanggil internal: tampilkan overlay dengan pesan.
-    """
     st.markdown(
         f"""
         <div class="overlay-loading">
@@ -74,44 +63,22 @@ def action_with_loader(
     fn,
     button_type: str = "primary",
 ):
-    """
-    Pattern umum:
-      - Render tombol
-      - Klik pertama -> set state "running" + rerun
-      - Rerun berikutnya -> tampilkan overlay + jalankan fn()
-      - Setelah selesai -> reset state + rerun lagi
-
-    Cara pakai di page:
-      def do_something():
-          ... kerja berat, tulis ke DB, dll ...
-
-      action_with_loader(
-          key="save_penjualan",
-          button_label="Simpan perubahan penjualan",
-          message="Menyimpan perubahan penjualan ke database...",
-          fn=do_something,
-      )
-    """
     state_key = f"{key}__state"
     msg_key = f"{key}__msg"
 
-    # init state
     if state_key not in st.session_state:
         st.session_state[state_key] = "idle"
         st.session_state[msg_key] = ""
 
-    # PHASE 2: kalau sedang running -> tampilkan overlay + eksekusi fn
     if st.session_state[state_key] == "running":
         _render_overlay(st.session_state[msg_key] or message)
         try:
             fn()
         finally:
-            # selesai, reset dan rerun agar overlay hilang
             st.session_state[state_key] = "idle"
             st.session_state[msg_key] = ""
             st.rerun()
 
-    # PHASE 1: render tombol
     if st.button(button_label, type=button_type, key=f"btn__{key}"):
         st.session_state[state_key] = "running"
         st.session_state[msg_key] = message
